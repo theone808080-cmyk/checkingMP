@@ -5,6 +5,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import date, datetime
 
 import db
@@ -76,11 +77,8 @@ def probe():
         return {"available": False, "error": str(error)}
 
 
-def process(conn):
-    base, model, timeout, limit = settings()
-    batch = db.pending_materials(conn, limit)
-    if not batch:
-        return (0, 0, 0)
+def infer(batch):
+    base, model, timeout, _ = settings()
     prompt = ("Analyze the supplied public materials. Return only a JSON object with arrays signals and skipped_material_ids. "
               "Each signal requires material_ids, platform, topic, severity (critical, important, info), summary, "
               "recommended_action, verification (confirmed, needs_check); optional effective_date (YYYY-MM-DD) and event_key. "
@@ -97,12 +95,67 @@ def process(conn):
         payload = validate(strict_loads(content), batch)
     except (OSError, ValueError, UnicodeError, KeyError, IndexError, TypeError) as error:
         raise RuntimeError(f"LM Studio processing failed; queue unchanged: {error}") from error
+    return payload
+
+
+def process(conn):
+    _, _, _, limit = settings()
+    batch = db.pending_materials(conn, limit)
+    if not batch:
+        return (0, 0, 0)
+    payload = infer(batch)
     with conn.transaction():
         return db.import_signals(conn, payload["signals"], payload["skipped_material_ids"])
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def process_remote(base, token):
+    parsed = urlsplit(base)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("WORKER_API_URL must be an HTTPS origin without credentials, query or fragment")
+    if parsed.path not in ("", "/"):
+        raise ValueError("WORKER_API_URL must be an HTTPS origin without a path")
+    base = base.rstrip("/")
+    _, _, timeout, limit = settings()
+    opener = urllib.request.build_opener(NoRedirect())
+    headers = {"Authorization": "Bearer " + token}
+    try:
+        request = urllib.request.Request(base + f"/api/worker/pending?limit={limit}", headers=headers)
+        with opener.open(request, timeout=timeout) as response:
+            batch = strict_loads(response.read().decode("utf-8"))["materials"]
+        if not isinstance(batch, list) or len(batch) > limit or any(not isinstance(item, dict) or type(item.get("material_id")) is not int or item["material_id"] <= 0 for item in batch) or len({item["material_id"] for item in batch}) != len(batch):
+            raise ValueError("Invalid pending batch")
+    except (OSError, ValueError, UnicodeError, KeyError, TypeError) as error:
+        raise RuntimeError("Worker API pending request failed") from error
+    if not batch:
+        return (0, 0, 0)
+    payload = infer(batch)
+    payload["batch_material_ids"] = [item["material_id"] for item in batch]
+    request = urllib.request.Request(base + "/api/worker/results", data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={**headers, "Content-Type": "application/json"}, method="POST")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            result = strict_loads(response.read().decode("utf-8"))
+        counts = tuple(result[key] for key in ("created", "linked", "skipped"))
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise ValueError("Invalid result counts")
+        return counts
+    except (OSError, ValueError, UnicodeError, KeyError, TypeError) as error:
+        raise RuntimeError("Worker API result status unknown; inspect queue before retrying") from error
+
+
 def main():
-    with db.connect() as conn:
-        db.init_schema(conn)
-        created, linked, skipped = process(conn)
+    base = os.getenv("WORKER_API_URL", "").strip()
+    token = os.getenv("WORKER_TOKEN", "").strip()
+    if bool(base) != bool(token):
+        raise ValueError("Set both WORKER_API_URL and WORKER_TOKEN, or neither")
+    if base:
+        created, linked, skipped = process_remote(base, token)
+    else:
+        with db.connect() as conn:
+            db.init_schema(conn)
+            created, linked, skipped = process(conn)
     print(f"Events created: {created}; materials linked: {linked}; skipped: {skipped}")

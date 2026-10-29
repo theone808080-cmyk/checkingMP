@@ -75,6 +75,35 @@ class WorkerTests(unittest.TestCase):
         with patch.object(worker.urllib.request, "urlopen", side_effect=OSError("offline")):
             self.assertFalse(worker.probe()["available"])
 
+    def test_remote_round_trip(self):
+        payload = {"signals": [SIGNAL], "skipped_material_ids": [2]}
+        with patch.object(worker.urllib.request, "build_opener") as factory, patch.object(worker.urllib.request, "urlopen", return_value=response(json.dumps(payload))):
+            api = factory.return_value.open
+            api.side_effect = [Response(json.dumps({"materials": BATCH}).encode()), Response(b'{"created":1,"linked":1,"skipped":1}')]
+            self.assertEqual(worker.process_remote("https://radar.example", "secret"), (1, 1, 1))
+            first, second = [call.args[0] for call in api.call_args_list]
+            self.assertEqual(first.full_url, "https://radar.example/api/worker/pending?limit=2")
+            self.assertEqual(first.get_header("Authorization"), "Bearer secret")
+            self.assertEqual(second.full_url, "https://radar.example/api/worker/results")
+            self.assertEqual(json.loads(second.data)["batch_material_ids"], [1, 2])
+        self.import_mock.assert_not_called()
+
+    def test_remote_rejects_insecure_and_partial_configuration(self):
+        with self.assertRaises(ValueError):
+            worker.process_remote("http://radar.example", "secret")
+        with patch.dict(worker.os.environ, {"WORKER_API_URL": "https://radar.example", "WORKER_TOKEN": ""}), patch.object(worker.db, "connect") as connect:
+            with self.assertRaises(ValueError):
+                worker.main()
+            connect.assert_not_called()
+
+    def test_remote_model_failure_never_posts(self):
+        with patch.object(worker.urllib.request, "build_opener") as factory, patch.object(worker.urllib.request, "urlopen", side_effect=OSError("offline")):
+            api = factory.return_value.open
+            api.return_value = Response(json.dumps({"materials": BATCH}).encode())
+            with self.assertRaises(RuntimeError):
+                worker.process_remote("https://radar.example", "secret")
+            self.assertEqual(api.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
