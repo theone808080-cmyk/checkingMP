@@ -99,6 +99,12 @@ class WebTests(unittest.TestCase):
         self.assertEqual((status, json.loads(body)), (200, {"created": 0, "linked": 0, "skipped": 1}))
         self.import_mock.assert_called_once_with(self.conn, [], [1])
 
+    def test_worker_api_cannot_confirm_a_signal(self):
+        signal = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "severity": "info", "summary": "Summary", "recommended_action": "Check", "verification": "confirmed"}
+        payload = {"batch_material_ids": [1, 2], "signals": [signal], "skipped_material_ids": [2]}
+        self.assertEqual(self.request("POST", "/api/worker/results", "Bearer token", json.dumps(payload))[0], 200)
+        self.assertEqual(self.import_mock.call_args.args[1][0]["verification"], "needs_check")
+
     def test_invalid_or_stale_results_never_import(self):
         base = {"batch_material_ids": [1, 2], "signals": [], "skipped_material_ids": []}
         signal = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "severity": "info", "summary": "Summary", "recommended_action": "Check", "verification": "needs_check"}

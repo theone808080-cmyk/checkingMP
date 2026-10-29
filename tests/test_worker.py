@@ -4,6 +4,7 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import main as cli
 from worker import main as worker
 
 
@@ -51,6 +52,31 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(json.loads(req.data)["model"], "test")
         self.import_mock.assert_called_once_with(self.conn, payload["signals"], [2])
         self.assertEqual(self.conn.transactions, 1)
+
+    def test_model_verification_is_always_unconfirmed_locally(self):
+        for value in ("confirmed", "unexpected", None):
+            signal = {**SIGNAL, "verification": value}
+            payload = {"signals": [signal], "skipped_material_ids": [2]}
+            with self.subTest(value=value), patch.object(worker.urllib.request, "urlopen", return_value=response(json.dumps(payload))):
+                worker.process(self.conn)
+                self.assertEqual(self.import_mock.call_args.args[1][0]["verification"], "needs_check")
+        self.assertEqual(signal["verification"], None)
+
+    def test_remote_model_confirmed_is_sent_as_needs_check(self):
+        payload = {"signals": [{**SIGNAL, "verification": "confirmed"}], "skipped_material_ids": [2]}
+        with patch.object(worker.urllib.request, "build_opener") as factory, patch.object(worker.urllib.request, "urlopen", return_value=response(json.dumps(payload))):
+            api = factory.return_value.open
+            api.side_effect = [Response(json.dumps({"materials": BATCH}).encode()), Response(b'{"created":1,"linked":1,"skipped":1}')]
+            worker.process_remote("https://radar.example", "secret")
+            self.assertEqual(json.loads(api.call_args_list[1].args[0].data)["signals"][0]["verification"], "needs_check")
+
+    def test_manual_review_import_preserves_confirmed(self):
+        signal = {**SIGNAL, "verification": "confirmed"}
+        payload = {"signals": [signal], "skipped_material_ids": []}
+        with patch.object(cli.Path, "read_text", return_value=json.dumps(payload)), patch.object(cli.db, "connect") as connect, patch.object(cli.db, "init_schema"):
+            conn = connect.return_value.__enter__.return_value
+            cli.import_review("review.json")
+            self.import_mock.assert_called_once_with(conn, [signal], [])
 
     def test_failures_never_import(self):
         invalid = ["```json\n{}\n```", '{"signals": [], "signals": [], "skipped_material_ids": []}', json.dumps({"signals": [SIGNAL], "skipped_material_ids": [1]}), json.dumps({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": []}), json.dumps({"signals": [{**SIGNAL, "severity": "urgent"}], "skipped_material_ids": []})]

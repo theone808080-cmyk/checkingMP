@@ -180,7 +180,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = conn.execute("SELECT id FROM materials WHERE id = ANY(%s) AND status = 'new' ORDER BY id FOR UPDATE", (ids,)).fetchall()
                     if {row[0] for row in rows} != set(ids):
                         raise ValueError("batch no longer pending")
-                    worker.validate(payload, [{"material_id": row[0]} for row in rows])
+                    payload = worker.validate(payload, [{"material_id": row[0]} for row in rows])
                     created, linked, skipped = db.import_signals(conn, payload["signals"], payload["skipped_material_ids"])
             self.json_response(200, {"created": created, "linked": linked, "skipped": skipped})
         except (ValueError, UnicodeError, TypeError):
