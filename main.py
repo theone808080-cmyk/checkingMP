@@ -1,0 +1,69 @@
+"""Command entry point for the local manual-review pilot."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+import db
+from collector.main import main as collect
+from web.main import main as web
+
+WORK = Path(__file__).with_name("work")
+
+
+def json_default(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Не поддерживается: {type(value).__name__}")
+
+
+def prepare_review() -> None:
+    with db.connect() as conn:
+        db.init_schema(conn)
+        batch = db.pending_materials(conn)
+    WORK.mkdir(exist_ok=True)
+    target = WORK / "pending-review.json"
+    target.write_text(json.dumps({"materials": batch}, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
+    print(f"Подготовлено {len(batch)} материалов: {target}")
+
+
+def import_review(path: str) -> None:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    signals = payload.get("signals")
+    if not isinstance(signals, list):
+        raise ValueError("Ожидается объект JSON с массивом signals")
+    skipped = payload.get("skipped_material_ids", [])
+    if not isinstance(skipped, list):
+        raise ValueError("skipped_material_ids должен быть массивом")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        created, linked, skipped_count = db.import_signals(conn, signals, skipped)
+    print(f"Импортировано событий: {created}; связано материалов: {linked}; пропущено: {skipped_count}")
+
+
+def show_health() -> None:
+    with db.connect() as conn:
+        db.init_schema(conn)
+        print(json.dumps(db.health(conn), ensure_ascii=False, indent=2))
+
+
+COMMANDS = {"collect": collect, "prepare-review": prepare_review, "web": web, "health": show_health}
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit("Использование: python main.py collect | prepare-review | import-review <файл> | web | health")
+    command = sys.argv[1]
+    if command == "import-review":
+        if len(sys.argv) != 3:
+            sys.exit("Использование: python main.py import-review work\\reviewed-signals.json")
+        import_review(sys.argv[2])
+    elif command in COMMANDS:
+        COMMANDS[command]()
+    else:
+        sys.exit(f"Неизвестная команда: {command}")
+

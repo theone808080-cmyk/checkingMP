@@ -1,0 +1,11 @@
+[
+  {"code":"ozon_telegram","name":"Ozon Marketplace — Telegram","kind":"telegram","url":"https://t.me/s/ozonmarketplace","trust":"official","scope":"Ozon: логистика, тарифы, акции, правила продавцов"},
+  {"code":"wb_telegram","name":"Wildberries для продавцов — Telegram","kind":"telegram","url":"https://t.me/s/wbsellerofficial","trust":"official","scope":"Wildberries: условия, логистика, штрафы, реклама"},
+  {"code":"yandex_market_telegram","name":"Яндекс Маркет для продавцов — Telegram","kind":"telegram","url":"https://t.me/s/market_marketplace","trust":"official","scope":"Яндекс Маркет: продажи, поставки, продвижение"},
+  {"code":"crpt_breaking","name":"Честный ЗНАК / ЦРПТ — Telegram","kind":"telegram","url":"https://t.me/s/crptbreaking","trust":"official","scope":"Маркировка, включая бытовую химию и косметику"},
+  {"code":"chz_household_chemicals","name":"Честный ЗНАК: бытовая химия","kind":"html","url":"https://markirovka.ru/knowledge/tovarnye-gruppy/kosmetika-bytovaya-himiya/","trust":"official","scope":"Справка и изменения маркировки бытовой химии"},
+  {"code":"retail_ru_telegram","name":"Retail.ru — Telegram","kind":"telegram","url":"https://t.me/s/retail_ru","trust":"industry","scope":"Розница, e-commerce, маркетплейсы"},
+  {"code":"oborot_telegram","name":"Oborot.ru — Telegram","kind":"telegram","url":"https://t.me/s/oborotru","trust":"industry","scope":"Интернет-торговля и маркетплейсы"},
+  {"code":"e_pepper_telegram","name":"E-pepper — Telegram","kind":"telegram","url":"https://t.me/s/e_pepper","trust":"industry","scope":"E-commerce и цифровая торговля"},
+  {"code":"rospotrebnadzor_federal","name":"Роспотребнадзор: федеральные новости","kind":"html","url":"https://zpp.rospotrebnadzor.ru/news/federal/","trust":"regulator","scope":"Защита прав потребителей и требования к товарам"}
+]

@@ -1,0 +1,16 @@
+{
+  "signals": [
+    {
+      "event_key": "ozon|logistics|cross_docking_pvz|2026-10",
+      "material_ids": [123],
+      "platform": "Ozon",
+      "topic": "Логистика / FBO",
+      "severity": "important",
+      "summary": "Площадка открыла тестовый кросс-докинг в ПВЗ и ППЗ для части продавцов.",
+      "recommended_action": "Проверить применимость функции к своим поставкам и экономику FBO.",
+      "verification": "needs_check",
+      "effective_date": null
+    }
+  ],
+  "skipped_material_ids": [124]
+}
