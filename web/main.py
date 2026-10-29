@@ -6,7 +6,6 @@ import html
 import base64
 import binascii
 import hmac
-import hashlib
 import json
 import os
 from datetime import date, datetime
@@ -15,11 +14,6 @@ from urllib.parse import parse_qs, urlparse
 
 import db
 from worker import main as worker
-
-
-def batch_signature(ids):
-    message = json.dumps(ids, separators=(",", ":")).encode()
-    return hmac.new(os.environ["WORKER_TOKEN"].encode(), message, hashlib.sha256).hexdigest()
 
 
 def render(conn, filters: dict[str, str]) -> str:
@@ -77,6 +71,13 @@ body{{font-family:system-ui,sans-serif;max-width:1180px;margin:auto;padding:24px
 
 
 class Handler(BaseHTTPRequestHandler):
+    def __getattr__(self, name):
+        # BaseHTTPRequestHandler otherwise returns an unauthenticated 501 for
+        # unrecognized methods, before any of our route checks run.
+        if name.startswith("do_"):
+            return self.method_not_allowed
+        raise AttributeError(name)
+
     def authorized(self, worker_route=False):
         header = self.headers.get("Authorization", "")
         if worker_route:
@@ -140,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with db.connect() as conn:
                     batch = db.pending_materials(conn, limit)
-                self.json_response(200, {"materials": batch, "batch_token": batch_signature([item["material_id"] for item in batch])})
+                self.json_response(200, {"materials": batch})
             except Exception:
                 self.json_response(503, {"error": "database unavailable"})
             return
@@ -174,9 +175,6 @@ class Handler(BaseHTTPRequestHandler):
             ids = payload.get("batch_material_ids") if isinstance(payload, dict) else None
             if not isinstance(ids, list) or not 1 <= len(ids) <= 50 or any(type(i) is not int or i <= 0 for i in ids) or len(ids) != len(set(ids)):
                 raise ValueError("invalid batch")
-            signature = payload.get("batch_token")
-            if not isinstance(signature, str) or not hmac.compare_digest(signature.encode(), batch_signature(ids).encode()):
-                raise ValueError("invalid batch token")
             with db.connect() as conn:
                 with conn.transaction():
                     rows = conn.execute("SELECT id FROM materials WHERE id = ANY(%s) AND status = 'new' ORDER BY id FOR UPDATE", (ids,)).fetchall()
