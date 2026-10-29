@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import html
+import base64
+import binascii
+import hmac
+import hashlib
+import json
 import os
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import db
+from worker import main as worker
+
+
+def batch_signature(ids):
+    message = json.dumps(ids, separators=(",", ":")).encode()
+    return hmac.new(os.environ["WORKER_TOKEN"].encode(), message, hashlib.sha256).hexdigest()
 
 
 def render(conn, filters: dict[str, str]) -> str:
@@ -65,6 +77,34 @@ body{{font-family:system-ui,sans-serif;max-width:1180px;margin:auto;padding:24px
 
 
 class Handler(BaseHTTPRequestHandler):
+    def authorized(self, worker_route=False):
+        header = self.headers.get("Authorization", "")
+        if worker_route:
+            token = os.environ.get("WORKER_TOKEN", "")
+            return bool(token) and hmac.compare_digest(header.encode(), ("Bearer " + token).encode())
+        user = os.environ.get("WEB_BASIC_USER", "")
+        password = os.environ.get("WEB_BASIC_PASSWORD", "")
+        if not user or not password or not header.startswith("Basic "):
+            return False
+        try:
+            supplied = base64.b64decode(header[6:], validate=True)
+        except (ValueError, binascii.Error):
+            return False
+        return hmac.compare_digest(supplied, (user + ":" + password).encode())
+
+    def reject_auth(self, worker_route=False):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Bearer' if worker_route else 'Basic realm="Radar", charset="UTF-8"')
+        self.end_headers()
+
+    def json_response(self, status, payload):
+        body = json.dumps(payload, ensure_ascii=False, default=lambda x: x.isoformat() if isinstance(x, (date, datetime)) else str(x)).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == "/health":
             try:
@@ -79,6 +119,31 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"database unavailable")
             return
         parsed = urlparse(self.path)
+        worker_route = parsed.path.startswith("/api/worker/")
+        if not self.authorized(worker_route):
+            self.reject_auth(worker_route)
+            return
+        if worker_route:
+            if parsed.path != "/api/worker/pending":
+                self.json_response(404, {"error": "not found"})
+                return
+            try:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query) - {"limit"} or len(query.get("limit", ["10"])) != 1:
+                    raise ValueError("Invalid limit")
+                limit = int(query.get("limit", ["10"])[0])
+                if not 1 <= limit <= 50:
+                    raise ValueError("Invalid limit")
+            except ValueError:
+                self.json_response(400, {"error": "limit must be between 1 and 50"})
+                return
+            try:
+                with db.connect() as conn:
+                    batch = db.pending_materials(conn, limit)
+                self.json_response(200, {"materials": batch, "batch_token": batch_signature([item["material_id"] for item in batch])})
+            except Exception:
+                self.json_response(503, {"error": "database unavailable"})
+            return
         allowed = {"platform", "severity", "verification"}
         filters = {name: values[0] for name, values in parse_qs(parsed.query).items() if name in allowed}
         try:
@@ -92,6 +157,49 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        worker_route = parsed.path.startswith("/api/worker/")
+        if not self.authorized(worker_route):
+            self.reject_auth(worker_route)
+            return
+        if parsed.path != "/api/worker/results":
+            self.json_response(404, {"error": "not found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+            if not 0 < length <= 1_000_000:
+                raise ValueError("invalid length")
+            payload = worker.strict_loads(self.rfile.read(length).decode("utf-8"))
+            ids = payload.get("batch_material_ids") if isinstance(payload, dict) else None
+            if not isinstance(ids, list) or not 1 <= len(ids) <= 50 or any(type(i) is not int or i <= 0 for i in ids) or len(ids) != len(set(ids)):
+                raise ValueError("invalid batch")
+            signature = payload.get("batch_token")
+            if not isinstance(signature, str) or not hmac.compare_digest(signature.encode(), batch_signature(ids).encode()):
+                raise ValueError("invalid batch token")
+            with db.connect() as conn:
+                with conn.transaction():
+                    rows = conn.execute("SELECT id FROM materials WHERE id = ANY(%s) AND status = 'new' ORDER BY id FOR UPDATE", (ids,)).fetchall()
+                    if {row[0] for row in rows} != set(ids):
+                        raise ValueError("batch no longer pending")
+                    worker.validate(payload, [{"material_id": row[0]} for row in rows])
+                    created, linked, skipped = db.import_signals(conn, payload["signals"], payload["skipped_material_ids"])
+            self.json_response(200, {"created": created, "linked": linked, "skipped": skipped})
+        except (ValueError, UnicodeError, TypeError):
+            self.json_response(400, {"error": "invalid or stale batch or payload"})
+        except Exception:
+            self.json_response(503, {"error": "processing unavailable"})
+
+    def method_not_allowed(self):
+        worker_route = urlparse(self.path).path.startswith("/api/worker/")
+        if not self.authorized(worker_route):
+            self.reject_auth(worker_route)
+            return
+        self.send_response(405)
+        self.end_headers()
+
+    do_HEAD = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = method_not_allowed
+
     def log_message(self, _format, *_args):
         return
 
@@ -102,4 +210,4 @@ def main() -> None:
         db.init_schema(conn)
         db.sync_sources(conn)
     print(f"Откройте http://127.0.0.1:{port}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
