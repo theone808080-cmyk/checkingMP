@@ -11,6 +11,7 @@ from pathlib import Path
 import db
 from collector.main import main as collect
 from web.main import main as web
+from worker.main import main as process, probe
 
 WORK = Path(__file__).with_name("work")
 
@@ -48,15 +49,17 @@ def import_review(path: str) -> None:
 def show_health() -> None:
     with db.connect() as conn:
         db.init_schema(conn)
-        print(json.dumps(db.health(conn), ensure_ascii=False, indent=2))
+        result = db.health(conn)
+    result["lm_studio"] = probe()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-COMMANDS = {"collect": collect, "prepare-review": prepare_review, "web": web, "health": show_health}
+COMMANDS = {"collect": collect, "process": process, "prepare-review": prepare_review, "web": web, "health": show_health}
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("Использование: python main.py collect | prepare-review | import-review <файл> | web | health")
+        sys.exit("Использование: python main.py collect | process | prepare-review | import-review <файл> | web | health")
     command = sys.argv[1]
     if command == "import-review":
         if len(sys.argv) != 3:
