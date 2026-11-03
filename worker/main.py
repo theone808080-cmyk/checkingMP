@@ -11,6 +11,15 @@ from datetime import date, datetime
 import db
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def open_url(request, timeout):
+    return urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout)
+
+
 def settings():
     base = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip().rstrip("/")
     key = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -72,7 +81,7 @@ def probe():
     try:
         base, key, _, timeout, _, _ = settings()
         request = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + key})
-        with urllib.request.urlopen(request, timeout=min(timeout, 5)) as response:
+        with open_url(request, timeout=min(timeout, 5)) as response:
             data = strict_loads(response.read().decode("utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("data"), list):
             raise ValueError("Invalid models response")
@@ -91,7 +100,7 @@ def infer(batch):
     body = json.dumps({"model": model, "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(batch, ensure_ascii=False, default=lambda x: x.isoformat() if isinstance(x, (date, datetime)) else str(x))}], "temperature": 0, "max_tokens": max_tokens, "response_format": {"type": "json_object"}}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": "Bearer " + key}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_url(request, timeout=timeout) as response:
             envelope = strict_loads(response.read().decode("utf-8"))
         content = envelope["choices"][0]["message"]["content"]
         if not isinstance(content, str):
@@ -109,7 +118,11 @@ def process(conn):
         return (0, 0, 0)
     payload = validate(infer(batch), batch)
     with conn.transaction():
-        return db.import_signals(conn, payload["signals"], payload["skipped_material_ids"])
+        ids = [item["material_id"] for item in batch]
+        rows = conn.execute("SELECT id FROM materials WHERE id = ANY(%s) AND status = 'new' ORDER BY id FOR UPDATE", (ids,)).fetchall()
+        if {row[0] for row in rows} != set(ids):
+            raise ValueError("stale batch; queue unchanged")
+        return db.import_signals(conn, payload["signals"], payload["skipped_material_ids"], reject_confirmed=True)
 
 
 

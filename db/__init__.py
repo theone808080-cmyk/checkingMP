@@ -83,7 +83,7 @@ def pending_materials(conn, limit: int = 50) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in rows]
 
 
-def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids: Iterable[int] = ()) -> tuple[int, int, int]:
+def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids: Iterable[int] = (), *, reject_confirmed: bool = False) -> tuple[int, int, int]:
     created = linked = skipped = 0
     for signal in signals:
         required = {"material_ids", "platform", "topic", "severity", "summary", "recommended_action", "verification"}
@@ -96,14 +96,17 @@ def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids
         key = signal.get("event_key") or "|".join(
             [signal["platform"].strip().lower(), signal["topic"].strip().lower(), signal["summary"].strip().lower()]
         )
+        conflict_guard = " WHERE events.verification <> 'confirmed'" if reject_confirmed else ""
         event = conn.execute(
             """INSERT INTO events
                (event_key, platform, topic, severity, summary, recommended_action, verification, effective_date)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (event_key) DO UPDATE SET updated_at = now()
+               ON CONFLICT (event_key) DO UPDATE SET updated_at = now()""" + conflict_guard + """
                RETURNING id, (xmax = 0)""",
             (key, signal["platform"], signal["topic"], signal["severity"], signal["summary"], signal["recommended_action"], signal["verification"], signal.get("effective_date")),
         ).fetchone()
+        if event is None:
+            raise ValueError("model event collides with confirmed event")
         event_id, was_created = event
         created += int(was_created)
         for material_id in ids:
