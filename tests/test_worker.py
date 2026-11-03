@@ -39,7 +39,7 @@ class WorkerTests(unittest.TestCase):
         self.import_mock = self.importer.start()
         self.addCleanup(self.pending.stop)
         self.addCleanup(self.importer.stop)
-        env = patch.dict(worker.os.environ, {"LM_STUDIO_BASE_URL": "http://127.0.0.1:1234/v1", "LM_STUDIO_MODEL": "test", "LM_STUDIO_TIMEOUT": "5", "LM_STUDIO_BATCH_SIZE": "2"})
+        env = patch.dict(worker.os.environ, {"OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY": "secret", "OPENROUTER_MODEL": "test", "OPENROUTER_TIMEOUT": "5", "OPENROUTER_BATCH_SIZE": "2"}, clear=True)
         env.start()
         self.addCleanup(env.stop)
 
@@ -48,10 +48,16 @@ class WorkerTests(unittest.TestCase):
         with patch.object(worker.urllib.request, "urlopen", return_value=response(json.dumps(payload))) as http:
             self.assertEqual(worker.process(self.conn), (1, 1, 1))
         req = http.call_args.args[0]
-        self.assertEqual(req.full_url, "http://127.0.0.1:1234/v1/chat/completions")
+        self.assertEqual(req.full_url, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(req.get_header("Authorization"), "Bearer secret")
+        self.assertEqual(json.loads(req.data)["max_tokens"], 2500)
         self.assertEqual(json.loads(req.data)["model"], "test")
         self.import_mock.assert_called_once_with(self.conn, payload["signals"], [2])
         self.assertEqual(self.conn.transactions, 1)
+
+    def test_default_model(self):
+        with patch.dict(worker.os.environ, {"OPENROUTER_API_KEY": "secret"}, clear=True):
+            self.assertEqual(worker.settings()[2], "openai/gpt-4.1-nano")
 
     def test_model_verification_is_always_unconfirmed_locally(self):
         for value in ("confirmed", "unexpected", None):
@@ -62,13 +68,18 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(self.import_mock.call_args.args[1][0]["verification"], "needs_check")
         self.assertEqual(signal["verification"], None)
 
-    def test_remote_model_confirmed_is_sent_as_needs_check(self):
-        payload = {"signals": [{**SIGNAL, "verification": "confirmed"}], "skipped_material_ids": [2]}
-        with patch.object(worker.urllib.request, "build_opener") as factory, patch.object(worker.urllib.request, "urlopen", return_value=response(json.dumps(payload))):
-            api = factory.return_value.open
-            api.side_effect = [Response(json.dumps({"materials": BATCH}).encode()), Response(b'{"created":1,"linked":1,"skipped":1}')]
-            worker.process_remote("https://radar.example", "secret")
-            self.assertEqual(json.loads(api.call_args_list[1].args[0].data)["signals"][0]["verification"], "needs_check")
+    def test_missing_key_and_insecure_url_fail_before_import(self):
+        for env in ({"OPENROUTER_API_KEY": "  "}, {"OPENROUTER_BASE_URL": "http://example.com/v1"}, {"OPENROUTER_MAX_TOKENS": "2501"}):
+            with self.subTest(env=env), patch.dict(worker.os.environ, env), patch.object(worker.urllib.request, "urlopen") as http, self.assertRaises(ValueError):
+                worker.process(self.conn)
+            http.assert_not_called()
+        self.import_mock.assert_not_called()
+
+    def test_cycle_collects_before_processing(self):
+        calls = []
+        with patch.object(cli, "collect", side_effect=lambda: calls.append("collect")), patch.object(cli, "process", side_effect=lambda: calls.append("process")):
+            cli.cycle()
+        self.assertEqual(calls, ["collect", "process"])
 
     def test_manual_review_import_preserves_confirmed(self):
         signal = {**SIGNAL, "verification": "confirmed"}
@@ -101,34 +112,6 @@ class WorkerTests(unittest.TestCase):
         with patch.object(worker.urllib.request, "urlopen", side_effect=OSError("offline")):
             self.assertFalse(worker.probe()["available"])
 
-    def test_remote_round_trip(self):
-        payload = {"signals": [SIGNAL], "skipped_material_ids": [2]}
-        with patch.object(worker.urllib.request, "build_opener") as factory, patch.object(worker.urllib.request, "urlopen", return_value=response(json.dumps(payload))):
-            api = factory.return_value.open
-            api.side_effect = [Response(json.dumps({"materials": BATCH}).encode()), Response(b'{"created":1,"linked":1,"skipped":1}')]
-            self.assertEqual(worker.process_remote("https://radar.example", "secret"), (1, 1, 1))
-            first, second = [call.args[0] for call in api.call_args_list]
-            self.assertEqual(first.full_url, "https://radar.example/api/worker/pending?limit=2")
-            self.assertEqual(first.get_header("Authorization"), "Bearer secret")
-            self.assertEqual(second.full_url, "https://radar.example/api/worker/results")
-            self.assertEqual(json.loads(second.data)["batch_material_ids"], [1, 2])
-        self.import_mock.assert_not_called()
-
-    def test_remote_rejects_insecure_and_partial_configuration(self):
-        with self.assertRaises(ValueError):
-            worker.process_remote("http://radar.example", "secret")
-        with patch.dict(worker.os.environ, {"WORKER_API_URL": "https://radar.example", "WORKER_TOKEN": ""}), patch.object(worker.db, "connect") as connect:
-            with self.assertRaises(ValueError):
-                worker.main()
-            connect.assert_not_called()
-
-    def test_remote_model_failure_never_posts(self):
-        with patch.object(worker.urllib.request, "build_opener") as factory, patch.object(worker.urllib.request, "urlopen", side_effect=OSError("offline")):
-            api = factory.return_value.open
-            api.return_value = Response(json.dumps({"materials": BATCH}).encode())
-            with self.assertRaises(RuntimeError):
-                worker.process_remote("https://radar.example", "secret")
-            self.assertEqual(api.call_count, 1)
 
 
 if __name__ == "__main__":

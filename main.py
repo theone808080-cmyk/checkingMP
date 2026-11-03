@@ -50,16 +50,21 @@ def show_health() -> None:
     with db.connect() as conn:
         db.init_schema(conn)
         result = db.health(conn)
-    result["lm_studio"] = probe()
+    result["openrouter"] = probe()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-COMMANDS = {"collect": collect, "process": process, "prepare-review": prepare_review, "web": web, "health": show_health}
+def cycle() -> None:
+    collect()
+    process()
+
+
+COMMANDS = {"cycle": cycle, "collect": collect, "process": process, "prepare-review": prepare_review, "web": web, "health": show_health}
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("Использование: python main.py collect | process | prepare-review | import-review <файл> | web | health")
+        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | web | health")
     command = sys.argv[1]
     if command == "import-review":
         if len(sys.argv) != 3:

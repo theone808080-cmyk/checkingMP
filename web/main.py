@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import db
-from worker import main as worker
 
 
 def render(conn, filters: dict[str, str]) -> str:
@@ -78,11 +77,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.method_not_allowed
         raise AttributeError(name)
 
-    def authorized(self, worker_route=False):
+    def authorized(self):
         header = self.headers.get("Authorization", "")
-        if worker_route:
-            token = os.environ.get("WORKER_TOKEN", "")
-            return bool(token) and hmac.compare_digest(header.encode(), ("Bearer " + token).encode())
         user = os.environ.get("WEB_BASIC_USER", "")
         password = os.environ.get("WEB_BASIC_PASSWORD", "")
         if not user or not password or not header.startswith("Basic "):
@@ -93,9 +89,9 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(supplied, (user + ":" + password).encode())
 
-    def reject_auth(self, worker_route=False):
+    def reject_auth(self):
         self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Bearer' if worker_route else 'Basic realm="Radar", charset="UTF-8"')
+        self.send_header("WWW-Authenticate", 'Basic realm="Radar", charset="UTF-8"')
         self.end_headers()
 
     def json_response(self, status, payload):
@@ -120,30 +116,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"database unavailable")
             return
         parsed = urlparse(self.path)
-        worker_route = parsed.path.startswith("/api/worker/")
-        if not self.authorized(worker_route):
-            self.reject_auth(worker_route)
+        if not self.authorized():
+            self.reject_auth()
             return
-        if worker_route:
-            if parsed.path != "/api/worker/pending":
-                self.json_response(404, {"error": "not found"})
-                return
-            try:
-                query = parse_qs(parsed.query, keep_blank_values=True)
-                if set(query) - {"limit"} or len(query.get("limit", ["10"])) != 1:
-                    raise ValueError("Invalid limit")
-                limit = int(query.get("limit", ["10"])[0])
-                if not 1 <= limit <= 50:
-                    raise ValueError("Invalid limit")
-            except ValueError:
-                self.json_response(400, {"error": "limit must be between 1 and 50"})
-                return
-            try:
-                with db.connect() as conn:
-                    batch = db.pending_materials(conn, limit)
-                self.json_response(200, {"materials": batch})
-            except Exception:
-                self.json_response(503, {"error": "database unavailable"})
+        if parsed.path != "/":
+            self.json_response(404, {"error": "not found"})
             return
         allowed = {"platform", "severity", "verification"}
         filters = {name: values[0] for name, values in parse_qs(parsed.query).items() if name in allowed}
@@ -159,39 +136,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        worker_route = parsed.path.startswith("/api/worker/")
-        if not self.authorized(worker_route):
-            self.reject_auth(worker_route)
+        if not self.authorized():
+            self.reject_auth()
             return
-        if parsed.path != "/api/worker/results":
-            self.json_response(404, {"error": "not found"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", ""))
-            if not 0 < length <= 1_000_000:
-                raise ValueError("invalid length")
-            payload = worker.strict_loads(self.rfile.read(length).decode("utf-8"))
-            ids = payload.get("batch_material_ids") if isinstance(payload, dict) else None
-            if not isinstance(ids, list) or not 1 <= len(ids) <= 50 or any(type(i) is not int or i <= 0 for i in ids) or len(ids) != len(set(ids)):
-                raise ValueError("invalid batch")
-            with db.connect() as conn:
-                with conn.transaction():
-                    rows = conn.execute("SELECT id FROM materials WHERE id = ANY(%s) AND status = 'new' ORDER BY id FOR UPDATE", (ids,)).fetchall()
-                    if {row[0] for row in rows} != set(ids):
-                        raise ValueError("batch no longer pending")
-                    payload = worker.validate(payload, [{"material_id": row[0]} for row in rows])
-                    created, linked, skipped = db.import_signals(conn, payload["signals"], payload["skipped_material_ids"])
-            self.json_response(200, {"created": created, "linked": linked, "skipped": skipped})
-        except (ValueError, UnicodeError, TypeError):
-            self.json_response(400, {"error": "invalid or stale batch or payload"})
-        except Exception:
-            self.json_response(503, {"error": "processing unavailable"})
+        self.json_response(404, {"error": "not found"})
 
     def method_not_allowed(self):
-        worker_route = urlparse(self.path).path.startswith("/api/worker/")
-        if not self.authorized(worker_route):
-            self.reject_auth(worker_route)
+        if not self.authorized():
+            self.reject_auth()
             return
         self.send_response(405)
         self.end_headers()
