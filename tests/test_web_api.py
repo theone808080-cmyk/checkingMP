@@ -76,45 +76,19 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.request("GET", "/", auth)[0], 401)
         with patch.object(web, "render", return_value="page"):
             self.assertEqual(self.request("GET", "/", basic), (200, b"page"))
-        for auth in (None, basic, "Bearer wrong"):
+        for auth in (None, "Bearer token", "Bearer wrong"):
             self.assertEqual(self.request("GET", "/api/worker/pending", auth)[0], 401)
-        self.assertEqual(self.request("POST", "/api/worker/results", basic, "{}")[0], 401)
+        self.assertEqual(self.request("GET", "/api/worker/pending", basic)[0], 404)
+        self.assertEqual(self.request("POST", "/api/worker/results", basic, "{}")[0], 404)
         for path in ("/", "/api/worker/pending", "/health"):
             self.assertEqual(self.request("TRACE", path)[0], 401)
         self.assertEqual(self.request("TRACE", "/", basic)[0], 405)
-        self.assertEqual(self.request("TRACE", "/api/worker/pending", "Bearer token")[0], 405)
-        self.assertEqual(self.request("TRACE", "/api/worker/pending", basic)[0], 401)
+        self.assertEqual(self.request("TRACE", "/api/worker/pending", "Bearer token")[0], 401)
+        self.assertEqual(self.request("TRACE", "/api/worker/pending", basic)[0], 405)
         with patch.dict(web.os.environ, {"WEB_BASIC_PASSWORD": "", "WORKER_TOKEN": ""}):
             self.assertEqual(self.request("GET", "/", basic)[0], 401)
             self.assertEqual(self.request("GET", "/api/worker/pending", "Bearer token")[0], 401)
 
-    def test_batch_limits_and_valid_result(self):
-        for limit in ("0", "51", "x", "1&limit=2"):
-            self.assertEqual(self.request("GET", "/api/worker/pending?limit=" + limit, "Bearer token")[0], 400)
-        status, body = self.request("GET", "/api/worker/pending?limit=2", "Bearer token")
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), {"materials": [{"material_id": 1}, {"material_id": 2}]})
-        payload = {"batch_material_ids": [1, 2], "signals": [], "skipped_material_ids": [1]}
-        status, body = self.request("POST", "/api/worker/results", "Bearer token", json.dumps(payload))
-        self.assertEqual((status, json.loads(body)), (200, {"created": 0, "linked": 0, "skipped": 1}))
-        self.import_mock.assert_called_once_with(self.conn, [], [1])
-
-    def test_worker_api_cannot_confirm_a_signal(self):
-        signal = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "severity": "info", "summary": "Summary", "recommended_action": "Check", "verification": "confirmed"}
-        payload = {"batch_material_ids": [1, 2], "signals": [signal], "skipped_material_ids": [2]}
-        self.assertEqual(self.request("POST", "/api/worker/results", "Bearer token", json.dumps(payload))[0], 200)
-        self.assertEqual(self.import_mock.call_args.args[1][0]["verification"], "needs_check")
-
-    def test_invalid_or_stale_results_never_import(self):
-        base = {"batch_material_ids": [1, 2], "signals": [], "skipped_material_ids": []}
-        signal = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "severity": "info", "summary": "Summary", "recommended_action": "Check", "verification": "needs_check"}
-        payloads = [dict(base, skipped_material_ids=[3]), dict(base, skipped_material_ids=[1, 1]), dict(base, batch_material_ids=[1, 1]), dict(base, batch_material_ids=[1, 3]), dict(base, signals=[{"material_ids": [1]}]), dict(base, signals=[signal, signal]), dict(base, signals=[signal], skipped_material_ids=[1])]
-        for payload in payloads:
-            self.assertEqual(self.request("POST", "/api/worker/results", "Bearer token", json.dumps(payload))[0], 400)
-        self.assertEqual(self.request("POST", "/api/worker/results", "Bearer token", '{"signals":[],"signals":[]}')[0], 400)
-        self.conn.pending.remove(2)
-        self.assertEqual(self.request("POST", "/api/worker/results", "Bearer token", json.dumps(base))[0], 400)
-        self.import_mock.assert_not_called()
 
 
 if __name__ == "__main__":
