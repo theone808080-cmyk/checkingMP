@@ -148,6 +148,26 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(worker.process(self.conn), (0, 0, 0))
         http.assert_not_called()
 
+    def test_invalid_key_rejected_without_network_or_disclosure(self):
+        for key in ("synthetic-first\nsynthetic-second", "synthetic-first\rsynthetic-second", "synthetic key", " synthetic", "synthetic\x01key"):
+            with self.subTest(key=repr(key)), patch.dict(worker.os.environ, {"OPENROUTER_API_KEY": key}), patch.object(worker, "open_url", side_effect=AssertionError("network must not be called")) as http:
+                with self.assertRaises(ValueError) as caught:
+                    worker.infer(BATCH)
+                self.assertNotIn("synthetic", str(caught.exception))
+                result = worker.probe()
+                self.assertFalse(result["available"])
+                self.assertNotIn("synthetic", str(result))
+                http.assert_not_called()
+
+    def test_transport_error_does_not_disclose_key_or_exception_chain(self):
+        import traceback
+        key = "synthetic-secret"
+        with patch.dict(worker.os.environ, {"OPENROUTER_API_KEY": key}), patch.object(worker, "open_url", side_effect=ValueError("Bearer " + key)):
+            with self.assertRaises(RuntimeError) as caught:
+                worker.infer(BATCH)
+            self.assertNotIn(key, "".join(traceback.format_exception(caught.exception)))
+            self.assertNotIn(key, str(worker.probe()))
+
     def test_probe(self):
         with patch.object(worker, "open_url", return_value=Response(b'{"data":[{"id":"local"}]}')):
             self.assertEqual(worker.probe(), {"available": True, "models": ["local"]})

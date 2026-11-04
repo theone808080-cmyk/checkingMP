@@ -115,6 +115,8 @@ def main() -> None:
         db.sync_sources(conn)
         run_id = db.start_run(conn, SERVICE)
         total = 0
+        successful_sources = 0
+        failed_sources = 0
         try:
             sources = conn.execute("SELECT id, name, kind, url FROM sources WHERE active ORDER BY id").fetchall()
             for source_id, name, kind, url in sources:
@@ -123,11 +125,15 @@ def main() -> None:
                     new = sum(db.add_material(conn, source_id, run_id, item) for item in items)
                     total += new
                     conn.execute("UPDATE sources SET last_checked_at = now(), last_error = NULL WHERE id = %s", (source_id,))
+                    successful_sources += 1
                     print(f"[{SERVICE}] {name}: {len(items)} прочитано, {new} новых", flush=True)
                 except Exception as error:
+                    failed_sources += 1
                     conn.execute("UPDATE sources SET last_checked_at = now(), last_error = %s WHERE id = %s", (str(error)[:500], source_id))
                     print(f"[{SERVICE}] {name}: недоступен: {error}", flush=True)
-            db.finish_run(conn, run_id, "finished", total, f"Новых материалов: {total}")
+            if not successful_sources:
+                raise RuntimeError("No sources were successfully read")
+            db.finish_run(conn, run_id, "finished", total, f"New materials: {total}; sources read: {successful_sources}; source failures: {failed_sources}")
         except Exception as error:
             db.finish_run(conn, run_id, "failed", total, str(error))
             raise

@@ -19,3 +19,42 @@ class CollectorParsingTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["url"], "https://example.test/page")
         self.assertIn("Важное изменение", rows[0]["text"])
+
+
+class CollectorCycleTests(unittest.TestCase):
+    def run_cycle(self, sources, readers):
+        import main as cli
+        from collector import main as collector
+        from unittest.mock import MagicMock
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = sources
+        with patch.object(collector.db, "connect") as connect, patch.object(collector.db, "init_schema"), patch.object(collector.db, "sync_sources"), patch.object(collector.db, "start_run", return_value=7), patch.object(collector.db, "finish_run") as finish, patch.dict(collector.READERS, readers, clear=True), patch.object(cli, "process") as process:
+            connect.return_value.__enter__.return_value = conn
+            try:
+                cli.cycle()
+                error = None
+            except Exception as exc:
+                error = exc
+            return error, finish.call_args.args, process.call_count
+
+    def test_all_failed_sources_stop_cycle_and_mark_run_failed(self):
+        def failed(url):
+            raise OSError("unavailable")
+        error, finished, processed = self.run_cycle([(1, "one", "rss", "https://example.test")], {"rss": failed})
+        self.assertIsNotNone(error)
+        self.assertEqual(finished[2], "failed")
+        self.assertEqual(processed, 0)
+
+    def test_zero_sources_stop_cycle_and_mark_run_failed(self):
+        error, finished, processed = self.run_cycle([], {})
+        self.assertIsNotNone(error)
+        self.assertEqual(finished[2], "failed")
+        self.assertEqual(processed, 0)
+
+    def test_partial_failure_allows_cycle_when_source_read(self):
+        def failed(url):
+            raise OSError("unavailable")
+        error, finished, processed = self.run_cycle([(1, "one", "bad", "https://example.test"), (2, "two", "good", "https://example.test")], {"bad": failed, "good": lambda url: []})
+        self.assertIsNone(error)
+        self.assertEqual(finished[2], "finished")
+        self.assertEqual(processed, 1)
