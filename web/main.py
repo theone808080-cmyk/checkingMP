@@ -11,6 +11,7 @@ import os
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie, CookieError
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import db
@@ -130,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         if parsed.path == "/miniapp":
-            body = b'<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Radar</title></head><body></body></html>'
+            body = Path(__file__).with_name("miniapp.html").read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
