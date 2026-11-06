@@ -10,9 +10,11 @@ import json
 import os
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie, CookieError
 from urllib.parse import parse_qs, urlparse
 
 import db
+from web import telegram_auth
 
 
 def render(conn, filters: dict[str, str]) -> str:
@@ -92,13 +94,24 @@ class Handler(BaseHTTPRequestHandler):
     def reject_auth(self):
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="Radar", charset="UTF-8"')
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def session_authorized(self):
+        try:
+            cookie = SimpleCookie()
+            cookie.load(self.headers.get("Cookie", ""))
+            value = cookie.get("radar_session")
+            return bool(value and telegram_auth.valid_session(value.value, os.environ.get("TELEGRAM_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")))
+        except CookieError:
+            return False
 
     def json_response(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False, default=lambda x: x.isoformat() if isinstance(x, (date, datetime)) else str(x)).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -116,6 +129,36 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"database unavailable")
             return
         parsed = urlparse(self.path)
+        if parsed.path == "/miniapp":
+            body = b'<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Radar</title></head><body></body></html>'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path in ("/api/feed", "/api/sources"):
+            if not (self.authorized() or self.session_authorized()):
+                self.reject_auth()
+                return
+            try:
+                params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=10)
+                allowed = {"period", "platform", "cursor", "limit"} if parsed.path == "/api/feed" else set()
+                if any(key not in allowed or len(values) != 1 for key, values in params.items()):
+                    raise ValueError("invalid filters")
+                with db.connect() as conn:
+                    if parsed.path == "/api/feed":
+                        limit = int(params.get("limit", ["20"])[0])
+                        result = db.feed_materials(conn, params.get("period", ["all"])[0], params.get("platform", ["all"])[0], params.get("cursor", [None])[0], limit)
+                    else:
+                        result = db.feed_sources(conn)
+                self.json_response(200, result)
+            except (ValueError, TypeError):
+                self.json_response(400, {"error": "invalid request"})
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
+            return
         if not self.authorized():
             self.reject_auth()
             return
@@ -128,14 +171,35 @@ class Handler(BaseHTTPRequestHandler):
             with db.connect() as conn:
                 body = render(conn, filters).encode("utf-8")
             self.send_response(200)
-        except Exception as error:
+        except Exception:
             self.send_response(500)
-            body = f"Ошибка страницы: {html.escape(str(error))}".encode("utf-8")
+            body = "Ошибка страницы".encode("utf-8")
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path == "/miniapp/session":
+            try:
+                lengths = self.headers.get_all("Content-Length", [])
+                if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 16384 or self.headers.get("Transfer-Encoding"):
+                    raise ValueError("invalid body size")
+                payload = json.loads(self.rfile.read(int(lengths[0])).decode("utf-8"))
+                token = os.environ.get("TELEGRAM_TOKEN", "")
+                owner = os.environ.get("TELEGRAM_CHAT_ID", "")
+                if not isinstance(payload, dict) or set(payload) != {"initData"} or not telegram_auth.validate_init_data(payload["initData"], token, owner):
+                    self.json_response(401, {"error": "unauthorized"})
+                    return
+                value = telegram_auth.new_session(token, owner)
+                self.send_response(200)
+                self.send_header("Set-Cookie", f"radar_session={value}; Path=/; Max-Age=1800; HttpOnly; Secure; SameSite=Strict")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except (ValueError, UnicodeError, TypeError):
+                self.json_response(400, {"error": "invalid request"})
+            return
         if not self.authorized():
             self.reject_auth()
             return
