@@ -36,6 +36,15 @@ class NotificationTests(unittest.TestCase):
         collect.assert_called_once()
         connect.assert_not_called()
 
+    def test_partial_configuration_does_not_stop_collection(self):
+        with patch.dict(os.environ, {'TELEGRAM_TOKEN': CONFIG['TELEGRAM_TOKEN'],
+                                     'TELEGRAM_CHAT_ID': CONFIG['TELEGRAM_CHAT_ID']}, clear=True), \
+             patch.object(main, 'collect') as collect, patch.object(main, 'process'), \
+             patch.object(main.db, 'connect') as connect:
+            main.cycle()
+        collect.assert_called_once()
+        connect.assert_not_called()
+
     def test_cycle_baselines_before_collection_and_notifies_before_processing(self):
         calls = []
         with patch.object(main, 'prepare_notifications', side_effect=lambda: calls.append('baseline')), \

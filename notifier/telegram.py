@@ -15,7 +15,7 @@ def settings():
     token = os.environ.get('TELEGRAM_TOKEN', '')
     chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     url = os.environ.get('RADAR_MINIAPP_URL', '')
-    if not token and not chat and not url:
+    if not token or not chat or not url:
         return None
     parsed = urllib.parse.urlsplit(url)
     if (not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', token)
