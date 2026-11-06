@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Радар маркетплейсов</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root { color-scheme: light dark; --bg:#f4f6f7; --fg:#17232a; --muted:#63717a; --card:#fff; --line:#dce3e7; --accent:#147d7a; --button-text:#fff; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#121a1e; --fg:#edf3f4; --muted:#a6b6bc; --card:#1c282e; --line:#37494f; --accent:#65cbc2; --button-text:#102322; } }
+    * { box-sizing:border-box; } body { margin:0; font:16px/1.5 system-ui,sans-serif; color:var(--fg); background:var(--bg); }
+    .wrap { max-width:740px; margin:auto; padding:24px 16px 100px; } header { margin:4px 0 24px; } .eyebrow { color:var(--accent); font-size:12px; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
+    h1 { font-size:clamp(25px,6vw,36px); line-height:1.14; margin:8px 0; letter-spacing:-.035em; } h2 { font-size:22px; } p { margin:8px 0; } .muted { color:var(--muted); }
+    .filters { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:20px 0; } label { display:grid; gap:5px; color:var(--muted); font-size:13px; font-weight:600; }
+    select,button { font:inherit; } select { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
+    .card, .source, .about { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin:10px 0; overflow-wrap:anywhere; }
+    .meta { color:var(--muted); font-size:13px; } .card h3 { font-size:18px; line-height:1.3; margin:9px 0; } .card p { white-space:pre-line; } a { color:var(--accent); font-weight:650; } .card a { display:inline-block; margin-top:10px; }
+    .actions { text-align:center; margin:20px 0; } .more { background:var(--accent); color:var(--button-text); border:0; border-radius:10px; padding:11px 20px; font-weight:700; cursor:pointer; }
+    .status { color:var(--muted); min-height:1.5em; } .bottom { position:fixed; bottom:0; left:0; right:0; display:flex; justify-content:center; gap:8px; background:var(--card); border-top:1px solid var(--line); padding:8px 12px calc(8px + env(safe-area-inset-bottom)); }
+    .bottom button { flex:1; max-width:220px; padding:10px; border:0; border-radius:9px; color:var(--muted); background:transparent; font-weight:700; cursor:pointer; } .bottom button[aria-selected="true"] { color:var(--accent); background:var(--bg); }
+    [hidden] { display:none !important; } button:focus-visible,select:focus-visible,a:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+    @media (max-width:360px) { .filters { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <header><div class="eyebrow">Радар • Маркетплейсы</div><h1>Новости и изменения</h1><p class="muted">Материалы площадок, отрасли и «Честного знака»</p></header>
+  <section id="feed" aria-label="Лента">
+    <div class="filters">
+      <label>Период<select id="period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label>
+      <label>Источник<select id="platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label>
+    </div>
+    <p id="count" class="muted" aria-live="polite"></p><div id="cards"></div><p id="feed-status" class="status" role="status"></p>
+    <div class="actions"><button id="more" class="more" type="button" hidden>Показать ещё</button></div>
+  </section>
+  <section id="about" aria-label="Как собрано" hidden>
+    <h2>Как собрано</h2><div class="about"><p>Радар собирает материалы из открытых источников и сохраняет их в базе. Модель помогает разбирать материалы; в ленте показаны исходные публикации.</p><p class="muted">Источники → сбор → база → обработка → радар</p></div>
+    <h2>Источники</h2><div id="sources"></div><p id="source-status" class="status" role="status"></p>
+  </section>
+</main>
+<nav class="bottom" aria-label="Разделы"><button id="nav-feed" type="button" aria-selected="true">Лента</button><button id="nav-about" type="button" aria-selected="false">Как собрано</button></nav>
+<script>
+(() => {
+  'use strict';
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const byId = id => document.getElementById(id);
+  const state = { cursor:null, generation:0, loading:false };
+  function applyTheme() {
+    if (!tg) return;
+    const p = tg.themeParams || {};
+    for (const [key, value] of Object.entries({ '--bg':p.bg_color, '--fg':p.text_color, '--muted':p.hint_color, '--card':p.secondary_bg_color, '--accent':p.link_color, '--button-text':p.button_text_color })) {
+      if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) document.documentElement.style.setProperty(key, value);
+    }
+    document.documentElement.style.colorScheme = tg.colorScheme === 'dark' ? 'dark' : 'light';
+  }
+  if (tg) { tg.ready(); tg.expand(); applyTheme(); tg.onEvent('themeChanged', applyTheme); }
+  function element(tag, cls, text) { const node = document.createElement(tag); if (cls) node.className = cls; if (text != null) node.textContent = String(text); return node; }
+  function formatDate(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? 'Дата неизвестна' : new Intl.DateTimeFormat('ru-RU', {day:'numeric',month:'short',year:'numeric',timeZone:'Europe/Moscow'}).format(d); }
+  function safeURL(value) { try { const u = new URL(value); return ['http:', 'https:'].includes(u.protocol) ? u.href : null; } catch (_) { return null; } }
+  function addCard(item) {
+    const card = element('article', 'card');
+    const date = item.published_at || item.collected_at;
+    card.append(element('div','meta',`${item.source || 'Источник'} · ${formatDate(date)}${item.published_at ? '' : ' (дата сбора)'}`));
+    card.append(element('h3','',item.title || 'Без заголовка'));
+    if (item.text) card.append(element('p','',String(item.text).slice(0, 400) + (String(item.text).length > 400 ? '…' : '')));
+    const url = safeURL(item.url);
+    if (url) { const link = element('a','','Открыть источник ↗'); link.href=url; link.target='_blank'; link.rel='noopener noreferrer'; card.append(link); }
+    byId('cards').append(card);
+  }
+  async function request(path, options) { const response = await fetch(path, {cache:'no-store', credentials:'same-origin', ...options}); if (!response.ok) throw new Error(String(response.status)); return response; }
+  async function loadFeed(reset) {
+    if (reset) { state.generation++; state.cursor=null; state.loading=false; byId('cards').replaceChildren(); byId('count').textContent=''; }
+    if (state.loading) return;
+    const generation = state.generation; state.loading=true; byId('more').hidden=true; byId('feed-status').textContent='Загружаем материалы…';
+    const params = new URLSearchParams({period:byId('period').value, platform:byId('platform').value});
+    if (state.cursor) params.set('cursor',state.cursor);
+    try {
+      const data = await (await request('/api/feed?' + params)).json();
+      if (generation !== state.generation) return;
+      data.materials.forEach(addCard); state.cursor=data.next_cursor; byId('count').textContent=`Материалов: ${data.total}`;
+      byId('feed-status').textContent=data.total ? '' : 'По выбранным фильтрам материалов пока нет.'; byId('more').textContent='Показать ещё'; byId('more').hidden=!state.cursor;
+    } catch (_) { if (generation === state.generation) { byId('feed-status').textContent='Не удалось загрузить ленту. Проверьте вход и попробуйте снова.'; byId('more').textContent='Повторить'; byId('more').hidden=false; } }
+    finally { if (generation === state.generation) state.loading=false; }
+  }
+  async function loadSources() {
+    byId('source-status').textContent='Загружаем источники…';
+    try {
+      const data = await (await request('/api/sources')).json(); byId('sources').replaceChildren();
+      const labels = {ok:'Проверен',error:'Ошибка проверки',inactive:'Отключён',not_checked:'Ещё не проверялся'};
+      for (const item of data) { const box=element('div','source'); box.append(element('strong','',item.name),element('div','meta',`${labels[item.status] || 'Нет данных'}${item.last_checked_at ? ' · ' + formatDate(item.last_checked_at) : ''}`)); byId('sources').append(box); }
+      byId('source-status').textContent=data.length ? '' : 'Источников пока нет.';
+    } catch (_) { byId('source-status').textContent='Не удалось загрузить источники.'; }
+  }
+  function tab(name) { const feed = name === 'feed'; byId('feed').hidden=!feed; byId('about').hidden=feed; byId('nav-feed').setAttribute('aria-selected',String(feed)); byId('nav-about').setAttribute('aria-selected',String(!feed)); if (!feed) loadSources(); }
+  byId('nav-feed').addEventListener('click',()=>tab('feed')); byId('nav-about').addEventListener('click',()=>tab('about'));
+  byId('period').addEventListener('change',()=>loadFeed(true)); byId('platform').addEventListener('change',()=>loadFeed(true)); byId('more').addEventListener('click',()=>loadFeed(false));
+  async function start() {
+    try { if (tg && tg.initData) await request('/miniapp/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData})}); await loadFeed(true); }
+    catch (_) { byId('feed-status').textContent='Не удалось подтвердить доступ. Откройте ленту через бота.'; }
+  }
+  start();
+})();
+</script>
+</body>
+</html>

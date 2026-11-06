@@ -9,6 +9,7 @@ COPY main.py ./
 COPY collector ./collector
 COPY config ./config
 COPY db ./db
+COPY notifier ./notifier
 COPY web ./web
 COPY worker ./worker
 CMD ["python", "main.py", "web"]

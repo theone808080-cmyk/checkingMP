@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import os
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -31,14 +35,106 @@ def sync_sources(conn) -> int:
     sources = json.loads(SOURCE_CONFIG.read_text(encoding="utf-8"))
     for source in sources:
         conn.execute(
-            """INSERT INTO sources (code, name, kind, url, trust, scope, active)
-               VALUES (%(code)s, %(name)s, %(kind)s, %(url)s, %(trust)s, %(scope)s, true)
+            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active)
+               VALUES (%(code)s, %(name)s, %(kind)s, %(url)s, %(trust)s, %(scope)s, %(category)s, true)
                ON CONFLICT (code) DO UPDATE SET
                  name = EXCLUDED.name, kind = EXCLUDED.kind, url = EXCLUDED.url,
-                 trust = EXCLUDED.trust, scope = EXCLUDED.scope""",
+                 trust = EXCLUDED.trust, scope = EXCLUDED.scope, category = EXCLUDED.category""",
             source,
         )
     return len(sources)
+
+
+def _decode_feed_cursor(cursor: str) -> tuple[datetime, int, uuid.UUID]:
+    try:
+        if not isinstance(cursor, str) or not cursor or len(cursor) > 256:
+            raise ValueError
+        raw = base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True)
+        value = json.loads(raw)
+        if (not isinstance(value, list) or len(value) != 3 or
+                type(value[1]) is not int or not 1 <= value[1] <= 2147483647 or
+                not isinstance(value[2], str)):
+            raise ValueError
+        timestamp = datetime.fromisoformat(value[0])
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError
+        return timestamp, value[1], uuid.UUID(value[2])
+    except (ValueError, TypeError, UnicodeDecodeError, binascii.Error, OverflowError, AttributeError):
+        raise ValueError('invalid cursor') from None
+
+
+def _encode_feed_cursor(timestamp: datetime, row_id: int, snapshot_id: uuid.UUID) -> str:
+    raw = json.dumps([timestamp.isoformat(), row_id, str(snapshot_id)], separators=(',', ':')).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+
+
+def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+    if period not in ('all', 'today', 'week') or platform not in ('all', 'ozon', 'wildberries', 'yandex', 'chestny_znak', 'industry'):
+        raise ValueError('invalid feed filter')
+    if type(limit) is not int or limit < 1:
+        raise ValueError('invalid page size')
+    limit = min(limit, 20)
+    position = _decode_feed_cursor(cursor) if cursor is not None else None
+    conditions = []
+    params: list[Any] = []
+    if period != 'all':
+        start_offset = " - INTERVAL '6 days'" if period == 'week' else ''
+        moscow_midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
+        conditions.append("COALESCE(m.published_at, m.collected_at) >= (" + moscow_midnight + start_offset + ") AT TIME ZONE 'Europe/Moscow'")
+        conditions.append("COALESCE(m.published_at, m.collected_at) < (" + moscow_midnight + " + INTERVAL '1 day') AT TIME ZONE 'Europe/Moscow'")
+    if platform != 'all':
+        conditions.append('s.category = %s')
+        params.append(platform)
+    where = ' AND '.join(conditions) if conditions else 'true'
+    snapshot_id = uuid.uuid4() if position is None else position[2]
+    if position is None:
+        snapshot = ("expired AS (DELETE FROM feed_snapshots WHERE created_at < now() - INTERVAL '30 minutes'), "
+                    "snapshot AS (INSERT INTO feed_snapshots (id, period, platform, material_ids) "
+                    "SELECT %s, %s, %s, COALESCE(array_agg(m.id), ARRAY[]::integer[]) "
+                    "FROM materials m JOIN sources s ON s.id = m.source_id WHERE " + where +
+                    " RETURNING id, material_ids)")
+        query_params = [snapshot_id, period, platform] + params
+    else:
+        snapshot = ("snapshot AS (SELECT id, material_ids FROM feed_snapshots "
+                    "WHERE id = %s AND period = %s AND platform = %s "
+                    "AND created_at >= now() - INTERVAL '30 minutes')")
+        query_params = [snapshot_id, period, platform]
+    page_where = '' if position is None else ' WHERE (sort_date, id) < (%s, %s)'
+    if position is not None:
+        query_params.extend(position[:2])
+    results = conn.execute(
+        'WITH ' + snapshot + ', filtered AS MATERIALIZED ('
+        'SELECT m.id, m.title, m.text, m.url, m.published_at, m.collected_at, '
+        's.name AS source, s.category, COALESCE(m.published_at, m.collected_at) AS sort_date '
+        'FROM materials m JOIN sources s ON s.id = m.source_id CROSS JOIN snapshot WHERE m.id = ANY(snapshot.material_ids)) '
+        'SELECT snapshot.id, cardinality(snapshot.material_ids), page.* FROM snapshot '
+        'LEFT JOIN LATERAL (SELECT * FROM filtered' + page_where +
+        ' ORDER BY sort_date DESC, id DESC LIMIT %s) page ON true',
+        tuple(query_params + [limit + 1]),
+    ).fetchall()
+    if not results:
+        raise ValueError('expired or invalid cursor')
+    snapshot_id, total = results[0][:2]
+    rows = [row[2:] for row in results if row[2] is not None]
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    names = ('id', 'title', 'text', 'url', 'published_at', 'collected_at', 'source', 'category', 'sort_date')
+    cards = [dict(zip(names, row)) for row in rows]
+    for card in cards:
+        card.pop('sort_date')
+        for key in ('published_at', 'collected_at'):
+            if card[key] is not None:
+                card[key] = card[key].isoformat()
+    next_cursor = _encode_feed_cursor(rows[-1][-1], rows[-1][0], snapshot_id) if has_more else None
+    return {'materials': cards, 'total': total, 'next_cursor': next_cursor}
+
+
+def feed_sources(conn) -> list[dict[str, Any]]:
+    rows = conn.execute('SELECT code, name, category, active, last_checked_at, last_error FROM sources ORDER BY name, id').fetchall()
+    return [{'code': code, 'name': name, 'category': category,
+             'status': 'inactive' if not active else 'error' if error else 'ok' if checked else 'not_checked',
+             'last_checked_at': checked.isoformat() if checked else None}
+            for code, name, category, active, checked, error in rows]
 
 
 def start_run(conn, service: str) -> int:

@@ -2,12 +2,14 @@ import base64
 import http.client
 import json
 import threading
+import time
 import unittest
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 from web import main as web
+from test_telegram_auth import TOKEN, signed_data
 
 
 class Connection:
@@ -88,6 +90,33 @@ class WebTests(unittest.TestCase):
         with patch.dict(web.os.environ, {"WEB_BASIC_PASSWORD": "", "WORKER_TOKEN": ""}):
             self.assertEqual(self.request("GET", "/", basic)[0], 401)
             self.assertEqual(self.request("GET", "/api/worker/pending", "Bearer token")[0], 401)
+
+    def test_session_guards_private_feed_and_rejects_invalid_filters(self):
+        with patch.dict(web.os.environ, {"TELEGRAM_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "42"}):
+            self.assertEqual(self.request("GET", "/miniapp")[0], 200)
+            self.assertEqual(self.request("GET", "/api/feed")[0], 401)
+            self.assertEqual(self.request("POST", "/miniapp/session", body='{}')[0], 401)
+            conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+            conn.request("POST", "/miniapp/session", json.dumps({"initData": signed_data(timestamp=int(time.time()))}), {"Content-Type": "application/json"})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            cookie = response.getheader("Set-Cookie")
+            self.assertIn("HttpOnly", cookie)
+            self.assertIn("Secure", cookie)
+            self.assertIn("SameSite=Strict", cookie)
+            response.read()
+            conn.close()
+            headers = {"Cookie": cookie.split(";", 1)[0]}
+            with patch.object(web.db, "feed_materials", return_value={"materials": [], "total": 0, "next_cursor": None}):
+                conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+                conn.request("GET", "/api/feed", headers=headers)
+                response = conn.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Cache-Control"), "no-store")
+                response.read()
+                conn.close()
+            basic = "Basic " + base64.b64encode(b"user:password").decode()
+            self.assertEqual(self.request("GET", "/api/feed?period=all&period=today", basic)[0], 400)
 
 
 

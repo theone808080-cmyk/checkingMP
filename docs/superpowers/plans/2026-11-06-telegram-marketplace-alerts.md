@@ -1,197 +1,86 @@
-# Telegram Marketplace Alerts Implementation Plan
+# Telegram Mini App: implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> For agentic workers: execute sequentially in the isolated worktree with an independent review after each task. The specification is `docs/superpowers/specs/2026-11-06-telegram-marketplace-alerts-design.md`.
 
-**Goal:** Deliver each new marketplace-radar signal to Ivan's personal Telegram chat through `@Findersmpbot`, without exposing secrets or routinely duplicating messages.
+**Goal:** Display marketplace source materials as a private Telegram Mini App and send the owner a compact notification when new materials arrive.
 
-**Architecture:** Keep collection and OpenRouter processing unchanged. After `worker.process()` returns, a dedicated notification module claims undelivered event rows from PostgreSQL, sends them to the one configured Telegram chat, and marks an event delivered only after Telegram returns `ok: true`. A PostgreSQL claim prevents concurrent cycles from selecting the same event; ambiguous network failures remain explicitly at-least-once delivery rather than an untruthful exactly-once claim.
+**Architecture:** Keep the existing collector → PostgreSQL → OpenRouter → dashboard pipeline. Expose read-only Mini App APIs on the current server; verify Telegram initData server-side before granting a short-lived session. The collector's newly saved materials feed a PostgreSQL-backed notification checkpoint; a separate sender posts a single message with a Mini App button.
 
-**Tech Stack:** Python 3.12 standard-library `urllib`, PostgreSQL via `psycopg`, Coolify environment variables, Python `unittest`.
+**Stack:** Python 3.12 standard library, psycopg/PostgreSQL, responsive HTML/CSS/JavaScript, Telegram Bot API. No new external service.
 
-**Spec:** `docs/superpowers/specs/2026-11-06-telegram-marketplace-alerts-design.md`
+## Global constraints
 
-## Global Constraints
+- The ordinary browser remains protected by existing Basic Auth. Mini App access requires a valid signed Telegram initData user ID equal to `TELEGRAM_CHAT_ID`; never trust client-side identity or expose token.
+- API and notification responses, error logs, Git, tests, and documentation contain no real credentials; configure token and chat ID in Coolify only.
+- Show raw materials rather than model-generated summaries. Do not access marketplace accounts, receive bot commands, or disable the old Finder AI job automatically.
+- Notify only newly collected materials. Initial activation must baseline pre-existing material IDs and must not send a historical backlog.
+- Confirmed Telegram sends are not repeated; if Telegram accepted a request but its response was lost, a subsequent retry may duplicate a notice. Never claim exactly-once delivery.
+- Any external test send, bot menu change, deployment, or old-job change is a separate observable activation step and must follow the user's authorization and environment access.
 
-- Send all new `info`, `important`, and `critical` events; filtering by severity is not part of this version.
-- The recipient is exactly `TELEGRAM_CHAT_ID`; no default recipient, inbound bot commands, channels, or groups.
-- `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` exist only in runtime configuration, never in Git, tests, README values, exceptions, or logs.
-- Events retain `needs_check`; every rendered Telegram message says that it is a signal for verification, not a legal conclusion.
-- The existing 09:00 Finder AI job is outside this codebase; identify its server-side scheduler before any separate user-confirmed disablement.
-- Do not retry a Telegram request within the same `cycle` run. A later cycle may retry an event whose prior delivery was not confirmed.
+## Review focus
 
-## Review Focus
+- HMAC verification, freshness and identity: forged, duplicate-key, missing, expired or future initData must fail closed.
+- API must not leak material data before authentication; Basic Auth, `/health`, protected error handling and existing dashboard continue to work.
+- News pagination and counts must remain consistent under ties and live insertions; calendar filters use Europe/Moscow.
+- Notification checkpoints survive process crashes and overlapping scheduled cycles without dropping new materials or resending confirmed batches.
+- Token-bearing Telegram URLs, malformed API responses and exceptions must never reveal credentials.
 
-- A success-looking HTTP response whose JSON omits `ok: true` must leave the event undelivered; test in Task 2.
-- An API error body or transport exception must not leak `TELEGRAM_TOKEN`; test in Task 2.
-- Two concurrent claim attempts must not receive the same event ID; test the `FOR UPDATE SKIP LOCKED` query shape and state update in Task 1.
-- A second completed cycle must not re-send an event with `telegram_sent_at`; test in Task 1 and Task 3.
-- An unconfirmed timeout can be retried next cycle and may duplicate a message if Telegram accepted it before disconnect; document this boundary and test that the DB record stays pending in Task 2.
+### Task 1: Material feed and source status
 
----
+**Files:** `config/sources.json`, `db/schema.sql`, `db/__init__.py`, `tests/test_feed.py`.
 
-### Task 1: PostgreSQL delivery state and claim interface
+**Interfaces:** Implement `db.feed_materials(conn, period, platform, cursor, limit)` returning material cards, total, and next cursor; `db.feed_sources(conn)` returning source statuses.
 
-**Files:**
-- Modify: `db/schema.sql`
-- Modify: `db/__init__.py`
-- Create: `tests/test_telegram_delivery.py`
+- [ ] Write failing tests for all categories, all/today/week date boundaries in Moscow, fallback date, deterministic descending (date, id) cursor pagination and source statuses. Assert fresh unprocessed materials appear and injected filter values cannot become SQL.
+- [ ] Run tests and verify expected failures.
+- [ ] Add explicit source category in configuration and an idempotent `sources.category` migration that works on an existing database; update `sync_sources` to backfill categories. Map the nine current sources as specified, including Rospotrebnadzor as industry.
+- [ ] Implement parameterized read-only queries with capped page size 20 and opaque cursor containing sort date and ID. Use the effective publication timestamp or collection timestamp, stable descending ordering, and category-aware totals. Return source title, status and sanitized last check; never expose raw database errors in API.
+- [ ] Run focused and full tests and commit the task.
 
-**Interfaces:**
-- Produces: `db.claim_telegram_events(conn, limit: int = 50) -> list[dict[str, object]]`
-- Produces: `db.mark_telegram_delivered(conn, event_id: int, message_id: int) -> None`
-- Produces: `db.release_telegram_claim(conn, event_id: int, error: str) -> None`
-- Consumes: rows from `events` with `id`, `platform`, `topic`, `severity`, `summary`, `recommended_action`, `verification`, `telegram_sent_at`, `telegram_claimed_at`, and `telegram_last_error`.
+### Task 2: Telegram authentication and read-only routes
 
-- [ ] **Step 1: Write failing database-interface tests in `tests/test_telegram_delivery.py`**
+**Files:** `web/main.py`, `web/telegram_auth.py`, `tests/test_web_api.py`, `tests/test_telegram_auth.py`.
 
-Use a small recording connection stub. Assert that claiming selects only rows where `telegram_sent_at IS NULL` and `telegram_claimed_at IS NULL`, orders by event ID, and includes `FOR UPDATE SKIP LOCKED`. Assert that delivery stores the timestamp and Telegram message ID, while release clears the claim and truncates a diagnostic error without including a synthetic token.
+**Interfaces:** `validate_init_data(raw, token, allowed_user_id, now) -> bool`; POST `/miniapp/session` creates a short-lived HttpOnly Secure SameSite=Strict session; GET `/api/feed` and GET `/api/sources` require this session or existing Basic Auth.
 
-- [ ] **Step 2: Run the new test module to verify it fails**
+- [ ] Write failing tests with independently constructed Telegram HMAC fixtures for valid payload, changed signature, duplicate fields, wrong user, absent data/configuration, timestamps older than 5 minutes or more than 30 seconds in the future. Test routes for unauthorized requests, valid sessions, expiration, no public sensitive response, browser Basic Auth, and /health regression.
+- [ ] Run tests and verify expected failures.
+- [ ] Verify `initData` using Telegram's documented HMAC construction and constant-time comparison, strict query parsing, user JSON validation, integer owner ID matching and timestamp bounds. Do not log token, signature or initData.
+- [ ] Serve a data-free Mini App shell at `/miniapp`; POST-only session bootstrap with bounded request size; return a cryptographically random signed session cookie with 30-minute expiry and no token or user data in URL. Require authentication on every feed/status API request; no-store sensitive responses. Reject duplicate or invalid filters and cursors.
+- [ ] Test adversarial inputs, existing routes and health; run full tests and commit.
 
-Run: `..\.venv\Scripts\python.exe -m unittest tests.test_telegram_delivery -v`
+### Task 3: Responsive Telegram feed
 
-Expected: FAIL because the three delivery functions do not exist.
+**Files:** `web/miniapp.html`, `web/main.py`, `Dockerfile`, `tests/test_miniapp.py`.
 
-- [ ] **Step 3: Add idempotent delivery columns and indexes in `db/schema.sql`**
+**Interfaces:** `/miniapp` serves the static data-free shell; shell uses Telegram WebApp initData to establish session and calls Task 2 APIs.
 
-Add `ALTER TABLE events ADD COLUMN IF NOT EXISTS` statements for `telegram_sent_at TIMESTAMPTZ`, `telegram_claimed_at TIMESTAMPTZ`, `telegram_message_id BIGINT`, and `telegram_last_error TEXT`. Add one partial index for rows with `telegram_sent_at IS NULL`. Preserve all existing tables and data.
+- [ ] Write failing tests for shell delivery and absence of private data before login; escaping and safe HTTP(S) source links, filter controls, pagination and both screen sections. Verify static assets are included in Docker.
+- [ ] Run tests and verify expected failures.
+- [ ] Build accessible mobile-first cards, category and period controls, load-more pagination, counts, empty/loading/error states and source status section. Use Telegram theme parameters with light/dark fallback and respond to theme changes. Escape all source text, validate link schemes, and show publication/collection date appropriately.
+- [ ] Preserve existing browser dashboard and its Basic Auth; support browser access to the feed with the same existing credentials. Confirm that clicking a source link opens the original page.
+- [ ] Run automated tests plus a local browser smoke test at mobile and desktop widths in light and dark themes, then commit.
 
-- [ ] **Step 4: Implement the three `db` functions in `db/__init__.py`**
+### Task 4: Compact bot notifications
 
-`claim_telegram_events` must run its candidate selection and claim update in one transaction, use `FOR UPDATE SKIP LOCKED`, return only the fields required to format a message, set `telegram_claimed_at = now()`, and limit the batch to a bounded positive value. `mark_telegram_delivered` must set `telegram_sent_at = now()`, persist the API `message_id`, clear the claim and clear the last error. `release_telegram_claim` must clear the claim and store only a bounded, token-safe diagnostic string.
+**Files:** `notifier/telegram.py`, `db/schema.sql`, `db/__init__.py`, `main.py`, `.env.example`, `Dockerfile`, `tests/test_notifications.py`.
 
-- [ ] **Step 5: Run the database-interface tests to verify they pass**
+**Interfaces:** `notify_new_materials(conn)` uses `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` and HTTPS `RADAR_MINIAPP_URL`, producing one message with a web_app button per new-material batch.
 
-Run: `..\.venv\Scripts\python.exe -m unittest tests.test_telegram_delivery -v`
+- [ ] Write failing tests: baseline old rows on first activation; zero new rows produce no HTTP request; fresh rows produce correct count and button URL; concurrent cycles cannot claim the same batch; confirmed send advances checkpoint; timeout preserves pending batch and later retry; newly collected rows during sending remain pending; transport/API errors do not reveal token.
+- [ ] Run tests and verify expected failures.
+- [ ] Add idempotent durable outbox/checkpoint schema. At the start of the first configured cycle, before collection, atomically baseline current max material ID; thus existing history is excluded but that cycle's new rows are counted. A batch records immutable upper/lower IDs and count; claim excludes other senders, avoids holding transactions indefinitely, and recovers stale claims. Mark a batch sent only on Telegram `ok: true` with message ID. Never discard later material IDs while a batch is in flight.
+- [ ] POST fixed HTTPS Telegram `sendMessage` with plain text «Новых новостей: N» and inline `web_app` button «Открыть ленту». Validate token, numeric private chat ID, and HTTPS Mini App URL; no redirects or secret-bearing diagnostics. Missing configuration skips notifier without preventing collector or worker; call notification after collection even if subsequent model processing fails.
+- [ ] Provide explicit user-invoked operator command for `setChatMenuButton`, without inbound bot polling or background configuration. Document that running it changes the existing bot menu.
+- [ ] Test retries, empty collections, invalid config and full regression; commit.
 
-Expected: PASS.
+### Task 5: Documentation and controlled activation
 
-- [ ] **Step 6: Commit the database delivery state**
+**Files:** `README.md`, `progress.md`.
 
-```powershell
-git add db/schema.sql db/__init__.py tests/test_telegram_delivery.py
-git commit -m "feat: track Telegram event delivery"
-```
-
-### Task 2: Safe Telegram sender and message rendering
-
-**Files:**
-- Create: `notifier/__init__.py`
-- Create: `notifier/telegram.py`
-- Modify: `tests/test_telegram_delivery.py`
-
-**Interfaces:**
-- Consumes: one event dictionary returned by `db.claim_telegram_events`.
-- Produces: `telegram.settings() -> tuple[str, int, float]`
-- Produces: `telegram.render(event: dict[str, object]) -> str`
-- Produces: `telegram.send(event: dict[str, object]) -> int`
-- Produces: `telegram.deliver_pending(conn, limit: int = 50) -> tuple[int, int]`, returning `(delivered, failed)`.
-
-- [ ] **Step 1: Extend `tests/test_telegram_delivery.py` with failing sender tests**
-
-Mock the HTTP opener and database functions. Cover one rendered message for each severity value, `needs_check` text, source URL, valid `ok: true` API result with numeric `message_id`, empty queue without HTTP, missing configuration without HTTP, malformed JSON, `ok: false`, and a timeout. Assert that successful send calls `mark_telegram_delivered`; all failures call `release_telegram_claim`; no assertion or raised text contains a synthetic token.
-
-- [ ] **Step 2: Run the focused tests to verify they fail**
-
-Run: `..\.venv\Scripts\python.exe -m unittest tests.test_telegram_delivery -v`
-
-Expected: FAIL because `notifier.telegram` does not exist.
-
-- [ ] **Step 3: Implement `notifier/telegram.py` with fixed Telegram API transport**
-
-Read `TELEGRAM_TOKEN`, integer `TELEGRAM_CHAT_ID`, and optional `TELEGRAM_TIMEOUT` (default `15`, allowed range `1..120`) from the environment. Reject absent, whitespace-containing, or non-printable configuration before any request. POST JSON only to `https://api.telegram.org/bot<TOKEN>/sendMessage`, with the configured `chat_id`, rendered plain text, and link-preview suppression. Use a no-redirect opener; parse JSON with duplicate-key rejection; accept only a top-level object whose `ok` is exactly `true` and whose `result.message_id` is an integer. Never include URL, headers, response body, or token in raised errors.
-
-- [ ] **Step 4: Implement `render(event)` and `deliver_pending(conn, limit=50)`**
-
-Render severity, platform and topic, saved summary, recommended action, first linked material URL supplied by Task 1, and the fixed verification disclaimer. `deliver_pending` claims once, sends each event once, marks confirmed sends, releases failed sends, and returns counts without re-raising routine Telegram delivery failures into collection or OpenRouter processing.
-
-- [ ] **Step 5: Run the focused tests to verify they pass**
-
-Run: `..\.venv\Scripts\python.exe -m unittest tests.test_telegram_delivery -v`
-
-Expected: PASS, including no-network cases and failure-safe queue handling.
-
-- [ ] **Step 6: Commit the Telegram sender**
-
-```powershell
-git add notifier tests/test_telegram_delivery.py
-git commit -m "feat: deliver radar signals to Telegram"
-```
-
-### Task 3: Attach delivery to the cycle and document Coolify setup
-
-**Files:**
-- Modify: `main.py`
-- Modify: `.env.example`
-- Modify: `README.md`
-- Modify: `progress.md`
-- Modify: `tests/test_worker.py`
-- Modify: `tests/test_telegram_delivery.py`
-
-**Interfaces:**
-- Consumes: `telegram.deliver_pending(conn, limit=50)` from Task 2.
-- Produces: `main.cycle()` executes collection, OpenRouter processing, then Telegram delivery in that order.
-
-- [ ] **Step 1: Add failing orchestration tests**
-
-Extend `tests/test_worker.py` with `test_cycle_delivers_after_processing`, mocking collection, processing, and `notifier.telegram.deliver_pending`. Assert their order is exactly `collect`, `process`, `deliver`. Add a duplicate test in `tests/test_telegram_delivery.py` that mocks an already delivered event and proves no sender call occurs.
-
-- [ ] **Step 2: Run the orchestration tests to verify they fail**
-
-Run: `..\.venv\Scripts\python.exe -m unittest tests.test_worker.WorkerTests.test_cycle_delivers_after_processing -v`
-
-Expected: FAIL until `cycle()` includes the delivery step.
-
-- [ ] **Step 3: Modify `main.cycle()` to deliver after successful processing**
-
-Keep the existing order and allow no notification work when no claimed events exist. Use a fresh PostgreSQL connection for delivery after `process()` closes its connection, initialize the schema, invoke `deliver_pending`, and print only delivered/failed counts. Do not expose a manual public endpoint and do not add inbound Telegram polling.
-
-- [ ] **Step 4: Update configuration and operator documentation**
-
-In `.env.example`, add blank `TELEGRAM_TOKEN=`, blank `TELEGRAM_CHAT_ID=`, and `TELEGRAM_TIMEOUT=15` with an explicit warning that token and chat ID belong only in Coolify. In `README.md`, describe all-severity personal alerts, delivery retry semantics, the rare ambiguous-network duplicate boundary, and the exact Coolify verification sequence: deploy, add secrets, run one deliberate test cycle, check one message, then rerun without a duplicate. In `progress.md`, record the implemented milestone only after tests pass. State that disabling the legacy Finder AI task requires locating the old scheduler first and is not performed by deployment of this repository.
-
-- [ ] **Step 5: Run full regression verification**
-
-Run: `..\.venv\Scripts\python.exe -m unittest discover -s tests -v`
-
-Expected: PASS for all existing collector, web, worker, and new Telegram delivery tests.
-
-- [ ] **Step 6: Commit orchestration and documentation**
-
-```powershell
-git add main.py .env.example README.md progress.md tests/test_worker.py tests/test_telegram_delivery.py
-git commit -m "feat: run Telegram delivery after radar cycle"
-```
-
-### Task 4: Controlled server activation and legacy Finder separation
-
-**Files:**
-- Modify: `README.md`
-- Modify: `progress.md`
-
-**Interfaces:**
-- Consumes: deployed Task 3 application and Coolify Scheduled Task.
-- Produces: an evidence-backed activation record; no automated change to the separate Finder service.
-
-- [ ] **Step 1: Add an operator checklist for the required user-controlled secret entry**
-
-Document that the user enters the existing bot token and personal chat ID directly in Coolify, confirms both variables are hidden, and never sends either value in chat, GitHub, or screenshots. Include the exact variable names but no values.
-
-- [ ] **Step 2: Perform one user-observed controlled delivery only after separate confirmation**
-
-Use one known pending event or a bounded test record. Verify the message arrives from `@Findersmpbot`, contains the expected radar fields and disclaimer, and record its event ID/message ID without secrets. Do not perform this external send automatically from implementation.
-
-- [ ] **Step 3: Verify no routine duplicate and document delivery state**
-
-Re-run only the delivery portion against the same database state and verify no second message appears for the confirmed event. If a network-ambiguous failure occurs, report it as unknown delivery rather than claiming either success or duplicate prevention.
-
-- [ ] **Step 4: Locate, then separately seek confirmation to disable the old Finder AI scheduler**
-
-Inspect the Finder deployment/server for the exact scheduled command that generated the 09:00 AI digest. Report its resource and command first. Do not stop, delete, or alter that task until the user explicitly confirms that precise target.
-
-- [ ] **Step 5: Commit only documentation changes actually made during activation**
-
-```powershell
-git add README.md progress.md
-git commit -m "docs: record Telegram alert activation"
-```
+- [ ] Update documentation with environment variable names only, canonical Mini App URL from Coolify, baseline behavior, rare ambiguous-network duplicate, Basic Auth and Mini App access, menu configuration and the current scheduler.
+- [ ] Record implementation and test evidence in progress; do not state that deployment or message delivery succeeded until observed.
+- [ ] Deploy only the reviewed change according to user-authorized workflow. User enters token, ID and URL directly in Coolify; no secrets in chat or screenshots.
+- [ ] Perform one user-observed controlled notification and check button, feed, both themes, browser access, source links, pagination and lack of routine duplicate.
+- [ ] Locate the existing Finder AI scheduler and report its exact resource and command before changing it. Disable only that identified job when authorized; never delete the bot or database.
+- [ ] Commit documentation and run full tests, security review and UI smoke checks before final handoff.
