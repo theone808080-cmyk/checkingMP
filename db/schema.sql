@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS sources (
     last_error TEXT
 );
 
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'industry';
+
 CREATE TABLE IF NOT EXISTS runs (
     id SERIAL PRIMARY KEY,
     service TEXT NOT NULL,
