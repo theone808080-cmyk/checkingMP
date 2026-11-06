@@ -14,6 +14,28 @@ CONFIG = {'TELEGRAM_TOKEN': '123456:synthetic_token', 'TELEGRAM_CHAT_ID': '12345
 
 
 class NotificationTests(unittest.TestCase):
+    def test_failed_initial_baseline_stops_collection_until_retry(self):
+        with patch.dict(os.environ, CONFIG, clear=True), \
+             patch.object(main.db, 'connect') as connect, \
+             patch.object(main.db, 'init_schema'), \
+             patch.object(telegram, 'initialize', side_effect=[OSError('database offline'), None]), \
+             patch.object(main, 'collect') as collect, \
+             patch.object(main, 'send_notifications'), \
+             patch.object(main, 'process'):
+            connect.return_value.__enter__.return_value = object()
+            with self.assertRaises(RuntimeError):
+                main.cycle()
+            collect.assert_not_called()
+            main.cycle()
+            collect.assert_called_once()
+
+    def test_unconfigured_notifications_do_not_stop_collection(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(main, 'collect') as collect, \
+             patch.object(main, 'process'), patch.object(main.db, 'connect') as connect:
+            main.cycle()
+        collect.assert_called_once()
+        connect.assert_not_called()
+
     def test_cycle_baselines_before_collection_and_notifies_before_processing(self):
         calls = []
         with patch.object(main, 'prepare_notifications', side_effect=lambda: calls.append('baseline')), \

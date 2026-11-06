@@ -64,8 +64,7 @@ def prepare_notifications():
                 telegram.initialize(conn)
         return config
     except Exception:
-        print('Telegram notifications are unavailable')
-        return None
+        raise RuntimeError('Telegram initialization failed; collection postponed') from None
 
 
 def send_notifications(config=None):
