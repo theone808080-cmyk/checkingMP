@@ -78,8 +78,8 @@
       const data = await (await request('/api/feed?' + params)).json();
       if (generation !== state.generation) return;
       data.materials.forEach(addCard); state.cursor=data.next_cursor; byId('count').textContent=`Материалов: ${data.total}`;
-      byId('feed-status').textContent=data.total ? '' : 'По выбранным фильтрам материалов пока нет.'; byId('more').hidden=!state.cursor;
-    } catch (_) { if (generation === state.generation) byId('feed-status').textContent='Не удалось загрузить ленту. Проверьте вход и попробуйте снова.'; }
+      byId('feed-status').textContent=data.total ? '' : 'По выбранным фильтрам материалов пока нет.'; byId('more').textContent='Показать ещё'; byId('more').hidden=!state.cursor;
+    } catch (_) { if (generation === state.generation) { byId('feed-status').textContent='Не удалось загрузить ленту. Проверьте вход и попробуйте снова.'; byId('more').textContent='Повторить'; byId('more').hidden=false; } }
     finally { if (generation === state.generation) state.loading=false; }
   }
   async function loadSources() {

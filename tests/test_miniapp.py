@@ -1,6 +1,8 @@
 import http.client
 import threading
 import unittest
+import subprocess
+import shutil
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -38,6 +40,13 @@ class MiniAppTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         self.assertTrue((root / 'web' / 'miniapp.html').is_file())
         self.assertIn('COPY web ./web', (root / 'Dockerfile').read_text())
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is required for JavaScript interaction test')
+    def test_failed_load_more_can_retry_same_cursor(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(['node', str(root / 'tests' / 'miniapp_retry_test.js')],
+                                cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == '__main__':
