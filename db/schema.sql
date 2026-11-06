@@ -64,3 +64,20 @@ CREATE TABLE IF NOT EXISTS feed_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS notification_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    initialized BOOLEAN NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notification_batches (
+    id BIGSERIAL PRIMARY KEY,
+    count INTEGER NOT NULL CHECK (count > 0),
+    sent_at TIMESTAMPTZ,
+    telegram_message_id BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS notification_materials (
+    material_id INTEGER PRIMARY KEY REFERENCES materials(id),
+    batch_id BIGINT REFERENCES notification_batches(id)
+);
+

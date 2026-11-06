@@ -10,6 +10,7 @@ from pathlib import Path
 
 import db
 from collector.main import main as collect
+from notifier import telegram
 from web.main import main as web
 from worker.main import main as process, probe
 
@@ -54,12 +55,37 @@ def show_health() -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def prepare_notifications():
+    try:
+        config = telegram.settings()
+        if config is not None:
+            with db.connect() as conn:
+                db.init_schema(conn)
+                telegram.initialize(conn)
+        return config
+    except Exception:
+        print('Telegram notifications are unavailable')
+        return None
+
+
+def send_notifications(config=None):
+    if config is None:
+        return
+    try:
+        with db.connect() as conn:
+            telegram.notify_new_materials(conn, config)
+    except Exception:
+        print('Telegram notification failed; it will be retried')
+
+
 def cycle() -> None:
+    config = prepare_notifications()
     collect()
+    send_notifications(config)
     process()
 
 
-COMMANDS = {"cycle": cycle, "collect": collect, "process": process, "prepare-review": prepare_review, "web": web, "health": show_health}
+COMMANDS = {"cycle": cycle, "collect": collect, "process": process, "prepare-review": prepare_review, "web": web, "health": show_health, "telegram-set-menu": telegram.set_menu}
 
 
 if __name__ == "__main__":
