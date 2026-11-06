@@ -1,5 +1,6 @@
 import os
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -29,6 +30,9 @@ class FeedPostgresTests(unittest.TestCase):
             id SERIAL PRIMARY KEY, source_id INTEGER NOT NULL, url TEXT NOT NULL,
             title TEXT NOT NULL, text TEXT, published_at TIMESTAMPTZ,
             collected_at TIMESTAMPTZ NOT NULL, status TEXT NOT NULL)""")
+        self.conn.execute("""CREATE TEMP TABLE feed_snapshots (
+            id UUID PRIMARY KEY, period TEXT NOT NULL, platform TEXT NOT NULL,
+            material_ids INTEGER[] NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
         db.sync_sources(self.conn)
 
     def add(self, source, title, published, collected, status="new"):
@@ -100,6 +104,17 @@ class FeedPostgresTests(unittest.TestCase):
         self.assertEqual(result["materials"], [])
         self.assertEqual(wrapped.calls, 1)
 
+    def test_cursor_rejects_changed_filter_and_expired_snapshot(self):
+        timestamp = datetime.now(timezone.utc)
+        self.add('ozon_telegram', 'one', timestamp, timestamp)
+        self.add('ozon_telegram', 'two', timestamp, timestamp)
+        cursor = db.feed_materials(self.conn, limit=1)['next_cursor']
+        with self.assertRaises(ValueError):
+            db.feed_materials(self.conn, period='today', cursor=cursor)
+        self.conn.execute("UPDATE feed_snapshots SET created_at = now() - INTERVAL '31 minutes'")
+        with self.assertRaises(ValueError):
+            db.feed_materials(self.conn, cursor=cursor)
+
     def test_old_schema_migrates_twice_and_backfills_categories(self):
         with psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True) as conn:
             conn.execute('BEGIN')
@@ -117,6 +132,35 @@ class FeedPostgresTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT category FROM sources WHERE code = 'ozon_telegram'").fetchone()[0], 'ozon')
             finally:
                 conn.execute('ROLLBACK')
+
+    def test_open_transaction_committed_after_first_page_is_not_in_snapshot(self):
+        schema = 'feed_late_' + uuid.uuid4().hex
+        with psycopg.connect(os.environ['TEST_DATABASE_URL'], autocommit=True) as reader, \
+             psycopg.connect(os.environ['TEST_DATABASE_URL'], autocommit=False) as late:
+            reader.execute(f'CREATE SCHEMA {schema}')
+            try:
+                reader.execute(f'SET search_path = {schema}')
+                db.init_schema(reader)
+                db.sync_sources(reader)
+                late.execute(f'SET search_path = {schema}')
+                source_id = reader.execute("SELECT id FROM sources WHERE code = 'ozon_telegram'").fetchone()[0]
+                def insert(conn, title, published):
+                    conn.execute("""INSERT INTO materials(source_id, url, title, text, published_at, fingerprint)
+                        VALUES (%s, %s, %s, 'text', %s, %s)""",
+                        (source_id, 'https://example.org/' + title, title, published, title))
+                stamp = datetime.now(timezone.utc)
+                insert(reader, 'first', stamp)
+                insert(late, 'late', stamp - timedelta(days=1))
+                insert(reader, 'second', stamp)
+                first = db.feed_materials(reader, limit=1)
+                late.commit()
+                second = db.feed_materials(reader, cursor=first['next_cursor'], limit=20)
+                self.assertEqual(first['total'], 2)
+                self.assertEqual(second['total'], 2)
+                self.assertEqual([m['title'] for m in second['materials']], ['first'])
+            finally:
+                late.rollback()
+                reader.execute(f'DROP SCHEMA {schema} CASCADE')
 
 
 if __name__ == "__main__":

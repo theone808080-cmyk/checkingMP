@@ -56,3 +56,11 @@ CREATE TABLE IF NOT EXISTS event_materials (
     PRIMARY KEY (event_id, material_id)
 );
 
+CREATE TABLE IF NOT EXISTS feed_snapshots (
+    id UUID PRIMARY KEY,
+    period TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    material_ids INTEGER[] NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+

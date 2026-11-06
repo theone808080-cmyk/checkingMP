@@ -7,6 +7,7 @@ import base64
 import binascii
 import json
 import os
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -44,26 +45,26 @@ def sync_sources(conn) -> int:
     return len(sources)
 
 
-def _decode_feed_cursor(cursor: str) -> tuple[datetime, int, int]:
+def _decode_feed_cursor(cursor: str) -> tuple[datetime, int, uuid.UUID]:
     try:
         if not isinstance(cursor, str) or not cursor or len(cursor) > 256:
             raise ValueError
         raw = base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True)
         value = json.loads(raw)
         if (not isinstance(value, list) or len(value) != 3 or
-                type(value[1]) is not int or type(value[2]) is not int or
-                not 1 <= value[1] <= value[2] <= 2147483647):
+                type(value[1]) is not int or not 1 <= value[1] <= 2147483647 or
+                not isinstance(value[2], str)):
             raise ValueError
         timestamp = datetime.fromisoformat(value[0])
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError
-        return timestamp, value[1], value[2]
-    except (ValueError, TypeError, UnicodeDecodeError, binascii.Error, OverflowError):
+        return timestamp, value[1], uuid.UUID(value[2])
+    except (ValueError, TypeError, UnicodeDecodeError, binascii.Error, OverflowError, AttributeError):
         raise ValueError('invalid cursor') from None
 
 
-def _encode_feed_cursor(timestamp: datetime, row_id: int, watermark: int) -> str:
-    raw = json.dumps([timestamp.isoformat(), row_id, watermark], separators=(',', ':')).encode()
+def _encode_feed_cursor(timestamp: datetime, row_id: int, snapshot_id: uuid.UUID) -> str:
+    raw = json.dumps([timestamp.isoformat(), row_id, str(snapshot_id)], separators=(',', ':')).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip('=')
 
 
@@ -84,24 +85,36 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
     if platform != 'all':
         conditions.append('s.category = %s')
         params.append(platform)
-    conditions.append('m.id <= snapshot.watermark')
-    where = ' AND '.join(conditions)
-    snapshot = 'SELECT COALESCE(MAX(id), 0) AS watermark FROM materials' if position is None else 'SELECT %s::integer AS watermark'
-    query_params = ([] if position is None else [position[2]]) + params
+    where = ' AND '.join(conditions) if conditions else 'true'
+    snapshot_id = uuid.uuid4() if position is None else position[2]
+    if position is None:
+        snapshot = ("expired AS (DELETE FROM feed_snapshots WHERE created_at < now() - INTERVAL '30 minutes'), "
+                    "snapshot AS (INSERT INTO feed_snapshots (id, period, platform, material_ids) "
+                    "SELECT %s, %s, %s, COALESCE(array_agg(m.id), ARRAY[]::integer[]) "
+                    "FROM materials m JOIN sources s ON s.id = m.source_id WHERE " + where +
+                    " RETURNING id, material_ids)")
+        query_params = [snapshot_id, period, platform] + params
+    else:
+        snapshot = ("snapshot AS (SELECT id, material_ids FROM feed_snapshots "
+                    "WHERE id = %s AND period = %s AND platform = %s "
+                    "AND created_at >= now() - INTERVAL '30 minutes')")
+        query_params = [snapshot_id, period, platform]
     page_where = '' if position is None else ' WHERE (sort_date, id) < (%s, %s)'
     if position is not None:
         query_params.extend(position[:2])
     results = conn.execute(
-        'WITH snapshot AS (' + snapshot + '), filtered AS MATERIALIZED ('
+        'WITH ' + snapshot + ', filtered AS MATERIALIZED ('
         'SELECT m.id, m.title, m.text, m.url, m.published_at, m.collected_at, '
         's.name AS source, s.category, COALESCE(m.published_at, m.collected_at) AS sort_date '
-        'FROM materials m JOIN sources s ON s.id = m.source_id CROSS JOIN snapshot WHERE ' + where + ') '
-        'SELECT snapshot.watermark, (SELECT count(*) FROM filtered), page.* FROM snapshot '
+        'FROM materials m JOIN sources s ON s.id = m.source_id CROSS JOIN snapshot WHERE m.id = ANY(snapshot.material_ids)) '
+        'SELECT snapshot.id, cardinality(snapshot.material_ids), page.* FROM snapshot '
         'LEFT JOIN LATERAL (SELECT * FROM filtered' + page_where +
         ' ORDER BY sort_date DESC, id DESC LIMIT %s) page ON true',
         tuple(query_params + [limit + 1]),
     ).fetchall()
-    watermark, total = results[0][:2]
+    if not results:
+        raise ValueError('expired or invalid cursor')
+    snapshot_id, total = results[0][:2]
     rows = [row[2:] for row in results if row[2] is not None]
     has_more = len(rows) > limit
     rows = rows[:limit]
@@ -112,7 +125,7 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
         for key in ('published_at', 'collected_at'):
             if card[key] is not None:
                 card[key] = card[key].isoformat()
-    next_cursor = _encode_feed_cursor(rows[-1][-1], rows[-1][0], watermark) if has_more else None
+    next_cursor = _encode_feed_cursor(rows[-1][-1], rows[-1][0], snapshot_id) if has_more else None
     return {'materials': cards, 'total': total, 'next_cursor': next_cursor}
 
 
