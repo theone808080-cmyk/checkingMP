@@ -77,9 +77,28 @@ class FeedPostgresTests(unittest.TestCase):
         first = db.feed_materials(self.conn, limit=2)
         self.assertEqual([x["title"] for x in first["materials"]], ["three", "two"])
         self.add("ozon_telegram", "later", timestamp + timedelta(minutes=1), timestamp)
+        self.add("ozon_telegram", "late-old-publication", timestamp - timedelta(days=3), timestamp)
         second = db.feed_materials(self.conn, cursor=first["next_cursor"], limit=2)
         self.assertEqual([x["title"] for x in second["materials"]], ["one"])
+        self.assertEqual(first["total"], 3)
+        self.assertEqual(second["total"], 3)
         self.assertIsNone(second["next_cursor"])
+
+    def test_first_page_and_total_are_read_in_one_database_statement(self):
+        class CountingConnection:
+            def __init__(self, conn):
+                self.conn = conn
+                self.calls = 0
+
+            def execute(self, query, params):
+                self.calls += 1
+                return self.conn.execute(query, params)
+
+        wrapped = CountingConnection(self.conn)
+        result = db.feed_materials(wrapped)
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["materials"], [])
+        self.assertEqual(wrapped.calls, 1)
 
     def test_old_schema_migrates_twice_and_backfills_categories(self):
         with psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True) as conn:

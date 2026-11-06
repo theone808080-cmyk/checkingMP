@@ -44,24 +44,26 @@ def sync_sources(conn) -> int:
     return len(sources)
 
 
-def _decode_feed_cursor(cursor: str) -> tuple[datetime, int]:
+def _decode_feed_cursor(cursor: str) -> tuple[datetime, int, int]:
     try:
         if not isinstance(cursor, str) or not cursor or len(cursor) > 256:
             raise ValueError
         raw = base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True)
         value = json.loads(raw)
-        if not isinstance(value, list) or len(value) != 2 or type(value[1]) is not int or value[1] < 1:
+        if (not isinstance(value, list) or len(value) != 3 or
+                type(value[1]) is not int or type(value[2]) is not int or
+                not 1 <= value[1] <= value[2] <= 2147483647):
             raise ValueError
         timestamp = datetime.fromisoformat(value[0])
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError
-        return timestamp, value[1]
+        return timestamp, value[1], value[2]
     except (ValueError, TypeError, UnicodeDecodeError, binascii.Error, OverflowError):
         raise ValueError('invalid cursor') from None
 
 
-def _encode_feed_cursor(timestamp: datetime, row_id: int) -> str:
-    raw = json.dumps([timestamp.isoformat(), row_id], separators=(',', ':')).encode()
+def _encode_feed_cursor(timestamp: datetime, row_id: int, watermark: int) -> str:
+    raw = json.dumps([timestamp.isoformat(), row_id, watermark], separators=(',', ':')).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip('=')
 
 
@@ -82,19 +84,25 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
     if platform != 'all':
         conditions.append('s.category = %s')
         params.append(platform)
-    where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-    base = ' FROM materials m JOIN sources s ON s.id = m.source_id'
-    total = conn.execute('SELECT count(*)' + base + where, tuple(params)).fetchone()[0]
+    conditions.append('m.id <= snapshot.watermark')
+    where = ' AND '.join(conditions)
+    snapshot = 'SELECT COALESCE(MAX(id), 0) AS watermark FROM materials' if position is None else 'SELECT %s::integer AS watermark'
+    query_params = ([] if position is None else [position[2]]) + params
+    page_where = '' if position is None else ' WHERE (sort_date, id) < (%s, %s)'
     if position is not None:
-        conditions.append('(COALESCE(m.published_at, m.collected_at), m.id) < (%s, %s)')
-        params.extend(position)
-    where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-    rows = conn.execute(
-        'SELECT m.id, m.title, m.text, m.url, m.published_at, m.collected_at, s.name, s.category, '
-        'COALESCE(m.published_at, m.collected_at)' + base + where +
-        ' ORDER BY COALESCE(m.published_at, m.collected_at) DESC, m.id DESC LIMIT %s',
-        tuple(params + [limit + 1]),
+        query_params.extend(position[:2])
+    results = conn.execute(
+        'WITH snapshot AS (' + snapshot + '), filtered AS MATERIALIZED ('
+        'SELECT m.id, m.title, m.text, m.url, m.published_at, m.collected_at, '
+        's.name AS source, s.category, COALESCE(m.published_at, m.collected_at) AS sort_date '
+        'FROM materials m JOIN sources s ON s.id = m.source_id CROSS JOIN snapshot WHERE ' + where + ') '
+        'SELECT snapshot.watermark, (SELECT count(*) FROM filtered), page.* FROM snapshot '
+        'LEFT JOIN LATERAL (SELECT * FROM filtered' + page_where +
+        ' ORDER BY sort_date DESC, id DESC LIMIT %s) page ON true',
+        tuple(query_params + [limit + 1]),
     ).fetchall()
+    watermark, total = results[0][:2]
+    rows = [row[2:] for row in results if row[2] is not None]
     has_more = len(rows) > limit
     rows = rows[:limit]
     names = ('id', 'title', 'text', 'url', 'published_at', 'collected_at', 'source', 'category', 'sort_date')
@@ -104,7 +112,7 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
         for key in ('published_at', 'collected_at'):
             if card[key] is not None:
                 card[key] = card[key].isoformat()
-    next_cursor = _encode_feed_cursor(rows[-1][-1], rows[-1][0]) if has_more else None
+    next_cursor = _encode_feed_cursor(rows[-1][-1], rows[-1][0], watermark) if has_more else None
     return {'materials': cards, 'total': total, 'next_cursor': next_cursor}
 
 
