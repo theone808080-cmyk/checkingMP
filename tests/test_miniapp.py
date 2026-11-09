@@ -31,9 +31,13 @@ class MiniAppTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.getheader('Cache-Control'), 'no-store')
         self.assertIn('Лента', body)
+        self.assertIn('Находки', body)
         self.assertIn('Как собрано', body)
         self.assertIn('Сегодня', body)
         self.assertIn('Показать ещё', body)
+        self.assertIn('finding-importance', body)
+        self.assertIn('finding-topic', body)
+        self.assertIn('finding-source-type', body)
         self.assertNotIn('E-pepper — Telegram', body)
 
     def test_shell_is_packaged_with_web_directory(self):
@@ -45,6 +49,13 @@ class MiniAppTests(unittest.TestCase):
     def test_failed_load_more_can_retry_same_cursor(self):
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(['node', str(root / 'tests' / 'miniapp_retry_test.js')],
+                                cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is required for JavaScript interaction test')
+    def test_findings_view_renders_importance_and_applies_filters(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(['node', str(root / 'tests' / 'miniapp_findings_test.js')],
                                 cwd=root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

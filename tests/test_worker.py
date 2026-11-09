@@ -31,7 +31,7 @@ class Connection:
 
 
 BATCH = [{"material_id": 1, "title": "Example"}, {"material_id": 2, "title": "Other"}]
-SIGNAL = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "severity": "info", "summary": "Summary", "recommended_action": "Check", "verification": "needs_check"}
+SIGNAL = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "importance": 3, "summary": "Summary", "recommended_action": "Check", "verification": "needs_check"}
 
 
 def response(content):
@@ -53,7 +53,8 @@ class WorkerTests(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def test_valid_completion_and_request(self):
-        payload = {"signals": [SIGNAL], "skipped_material_ids": [2]}
+        signal = {**SIGNAL, "platform": "WB/Ozon"}
+        payload = {"signals": [signal], "skipped_material_ids": [2]}
         with patch.object(worker, "open_url", return_value=response(json.dumps(payload))) as http:
             self.assertEqual(worker.process(self.conn), (1, 1, 1))
         req = http.call_args.args[0]
@@ -64,8 +65,32 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(json.loads(req.data)["response_format"], {"type": "json_object"})
         self.assertEqual(json.loads(req.data)["max_tokens"], 2500)
         self.assertEqual(json.loads(req.data)["model"], "test")
-        self.import_mock.assert_called_once_with(self.conn, payload["signals"], [2], reject_confirmed=True)
+        self.assertIn("importance (integer 1-5", json.loads(req.data)["messages"][0]["content"])
+        imported_signal = {**signal, "platform": "Межплощадочная: Ozon, Wildberries", "verification": "needs_check"}
+        self.import_mock.assert_called_once_with(self.conn, [imported_signal], [2], reject_confirmed=True)
         self.assertEqual(self.conn.transactions, 1)
+
+    def test_model_importance_must_be_integer_between_one_and_five(self):
+        for value in range(1, 6):
+            with self.subTest(value=value):
+                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": []}
+                self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["importance"], value)
+        invalid_values = (None, True, False, 0, 6, 2.5, "3")
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": []}
+                worker.validate(payload, BATCH)
+        with self.assertRaises(ValueError):
+            payload = {"signals": [{key: value for key, value in SIGNAL.items() if key != "importance"}], "skipped_material_ids": []}
+            worker.validate(payload, BATCH)
+
+    def test_model_platforms_are_canonicalized_and_unknown_values_rejected(self):
+        for source, expected in (("Яндекс.Маркет", "Яндекс Маркет"), ("WB/Ozon", "Межплощадочная: Ozon, Wildberries")):
+            payload = {"signals": [{**SIGNAL, "platform": source}], "skipped_material_ids": []}
+            self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["platform"], expected)
+        payload = {"signals": [{**SIGNAL, "platform": "unknown marketplace"}], "skipped_material_ids": []}
+        with self.assertRaises(ValueError):
+            worker.validate(payload, BATCH)
 
     def test_default_model(self):
         with patch.dict(worker.os.environ, {"OPENROUTER_API_KEY": "secret"}, clear=True):
@@ -90,6 +115,14 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "confirmed"):
             self.actual_import(conn, [SIGNAL], reject_confirmed=True)
         self.assertIn("WHERE events.verification <> 'confirmed'", conn.query)
+
+    def test_manual_signal_import_rejects_invalid_importance_before_database_write(self):
+        class NoWriteConnection:
+            def execute(self, *_args, **_kwargs):
+                raise AssertionError("invalid importance must be rejected before SQL")
+        for value in (True, False, 0, 6, 2.5, "3", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.actual_import(NoWriteConnection(), [{**SIGNAL, "importance": value}])
 
     def test_openrouter_requests_reject_redirects(self):
         handler = worker.NoRedirect()
@@ -132,7 +165,7 @@ class WorkerTests(unittest.TestCase):
             self.import_mock.assert_called_once_with(conn, [signal], [])
 
     def test_failures_never_import(self):
-        invalid = ["```json\n{}\n```", '{"signals": [], "signals": [], "skipped_material_ids": []}', json.dumps({"signals": [SIGNAL], "skipped_material_ids": [1]}), json.dumps({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": []}), json.dumps({"signals": [{**SIGNAL, "severity": "urgent"}], "skipped_material_ids": []})]
+        invalid = ["```json\n{}\n```", '{"signals": [], "signals": [], "skipped_material_ids": []}', json.dumps({"signals": [SIGNAL], "skipped_material_ids": [1]}), json.dumps({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": []}), json.dumps({"signals": [{**SIGNAL, "importance": 9}], "skipped_material_ids": []})]
         for content in invalid:
             with self.subTest(content=content), patch.object(worker, "open_url", return_value=response(content)):
                 with self.assertRaises(RuntimeError):

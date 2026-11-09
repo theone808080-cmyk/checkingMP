@@ -5,7 +5,7 @@
       "material_ids": [123],
       "platform": "Ozon",
       "topic": "Логистика / FBO",
-      "severity": "important",
+      "importance": 3,
       "summary": "Площадка открыла тестовый кросс-докинг в ПВЗ и ППЗ для части продавцов.",
       "recommended_action": "Проверить применимость функции к своим поставкам и экономику FBO.",
       "verification": "needs_check",

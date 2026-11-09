@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_key TEXT NOT NULL UNIQUE,
     platform TEXT NOT NULL,
     topic TEXT NOT NULL,
-    severity TEXT NOT NULL CHECK (severity IN ('critical', 'important', 'info')),
+    importance SMALLINT NOT NULL CONSTRAINT events_importance_check CHECK (importance BETWEEN 1 AND 5),
     summary TEXT NOT NULL,
     recommended_action TEXT NOT NULL,
     verification TEXT NOT NULL CHECK (verification IN ('confirmed', 'needs_check')),
@@ -49,6 +49,29 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'events' AND column_name = 'severity'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'events' AND column_name = 'importance'
+    ) THEN
+        ALTER TABLE events DROP CONSTRAINT IF EXISTS events_severity_check;
+        ALTER TABLE events RENAME COLUMN severity TO importance;
+        ALTER TABLE events ALTER COLUMN importance TYPE SMALLINT USING
+            CASE importance
+                WHEN 'info' THEN 1
+                WHEN 'important' THEN 3
+                WHEN 'critical' THEN 5
+                ELSE NULL
+            END::SMALLINT;
+        ALTER TABLE events ADD CONSTRAINT events_importance_check CHECK (importance BETWEEN 1 AND 5);
+    END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS event_materials (
     event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -61,6 +84,13 @@ CREATE TABLE IF NOT EXISTS feed_snapshots (
     period TEXT NOT NULL,
     platform TEXT NOT NULL,
     material_ids INTEGER[] NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS finding_snapshots (
+    id UUID PRIMARY KEY,
+    filters_hash TEXT NOT NULL,
+    event_ids INTEGER[] NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

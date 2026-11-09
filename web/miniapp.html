@@ -15,6 +15,10 @@
     select,button { font:inherit; } select { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
     .card, .source, .about { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin:10px 0; overflow-wrap:anywhere; }
     .meta { color:var(--muted); font-size:13px; } .card h3 { font-size:18px; line-height:1.3; margin:9px 0; } .card p { white-space:pre-line; } a { color:var(--accent); font-weight:650; } .card a { display:inline-block; margin-top:10px; }
+    input { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
+    .finding-level { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; } .importance-square { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border:1px solid #59656b55; border-radius:5px; color:#142027; }
+    .importance-1 { background:#b9c1c7; } .importance-2 { background:#79b9e7; } .importance-3 { background:#f4d35e; } .importance-4 { background:#f4a261; } .importance-5 { background:#ef6c68; }
+    .finding-sources { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:8px; }
     .actions { text-align:center; margin:20px 0; } .more { background:var(--accent); color:var(--button-text); border:0; border-radius:10px; padding:11px 20px; font-weight:700; cursor:pointer; }
     .status { color:var(--muted); min-height:1.5em; } .bottom { position:fixed; bottom:0; left:0; right:0; display:flex; justify-content:center; gap:8px; background:var(--card); border-top:1px solid var(--line); padding:8px 12px calc(8px + env(safe-area-inset-bottom)); }
     .bottom button { flex:1; max-width:220px; padding:10px; border:0; border-radius:9px; color:var(--muted); background:transparent; font-weight:700; cursor:pointer; } .bottom button[aria-selected="true"] { color:var(--accent); background:var(--bg); }
@@ -33,18 +37,33 @@
     <p id="count" class="muted" aria-live="polite"></p><div id="cards"></div><p id="feed-status" class="status" role="status"></p>
     <div class="actions"><button id="more" class="more" type="button" hidden>Показать ещё</button></div>
   </section>
+  <section id="findings" aria-label="Находки" hidden>
+    <h2>Находки</h2>
+    <p class="muted">Краткие сводки по изменениям. Неподтверждённые находки требуют проверки.</p>
+    <div class="filters">
+      <label>Период<select id="finding-period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label>
+      <label>Площадка<select id="finding-platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label>
+      <label>Важность<select id="finding-importance"><option value="all">Все уровни</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label>
+      <label>Тема<input id="finding-topic" type="search" maxlength="120" placeholder="Найти по теме"></label>
+      <label>Проверка<select id="finding-verification"><option value="all">Любой статус</option><option value="confirmed">Подтверждено</option><option value="needs_check">Нужно проверить</option></select></label>
+      <label>Тип источника<select id="finding-source-type"><option value="all">Все источники</option><option value="official">Официальный</option><option value="regulator">Регуляторный</option><option value="industry">Отраслевой</option></select></label>
+    </div>
+    <p id="findings-count" class="muted" aria-live="polite"></p><div id="findings-cards"></div><p id="findings-status" class="status" role="status"></p>
+    <div class="actions"><button id="findings-more" class="more" type="button" hidden>Показать ещё</button></div>
+  </section>
   <section id="about" aria-label="Как собрано" hidden>
     <h2>Как собрано</h2><div class="about"><p>Радар собирает материалы из открытых источников и сохраняет их в базе. Модель помогает разбирать материалы; в ленте показаны исходные публикации.</p><p class="muted">Источники → сбор → база → обработка → радар</p></div>
     <h2>Источники</h2><div id="sources"></div><p id="source-status" class="status" role="status"></p>
   </section>
 </main>
-<nav class="bottom" aria-label="Разделы"><button id="nav-feed" type="button" aria-selected="true">Лента</button><button id="nav-about" type="button" aria-selected="false">Как собрано</button></nav>
+<nav class="bottom" aria-label="Разделы"><button id="nav-feed" type="button" aria-selected="true">Лента</button><button id="nav-findings" type="button" aria-selected="false">Находки</button><button id="nav-about" type="button" aria-selected="false">Как собрано</button></nav>
 <script>
 (() => {
   'use strict';
   const tg = window.Telegram && window.Telegram.WebApp;
   const byId = id => document.getElementById(id);
   const state = { cursor:null, generation:0, loading:false };
+  const findingsState = { cursor:null, generation:0, loading:false };
   function applyTheme() {
     if (!tg) return;
     const p = tg.themeParams || {};
@@ -67,6 +86,31 @@
     if (url) { const link = element('a','','Открыть источник ↗'); link.href=url; link.target='_blank'; link.rel='noopener noreferrer'; card.append(link); }
     byId('cards').append(card);
   }
+  function addFinding(item) {
+    const card = element('article', 'card');
+    const level = Number(item.importance);
+    if (Number.isInteger(level) && level >= 1 && level <= 5) {
+      const line = element('div', 'finding-level');
+      const square = element('span', `importance-square importance-${level}`, String(level));
+      square.setAttribute('aria-label', `Важность ${level}`);
+      line.append(square, element('span', '', `Важность ${level}`));
+      card.append(line);
+    }
+    card.append(element('div', 'meta', `${item.platform || 'Область не указана'} · ${item.topic || 'Без темы'} · ${item.verification === 'confirmed' ? 'Подтверждено' : 'Нужно проверить'}`));
+    card.append(element('h3', '', item.summary || 'Находка без описания'));
+    if (item.recommended_action) card.append(element('p', '', `Рекомендуемое действие: ${item.recommended_action}`));
+    if (item.effective_date) card.append(element('div', 'meta', `Дата вступления в силу: ${formatDate(item.effective_date)}`));
+    const links = element('div', 'finding-sources');
+    for (const source of item.sources || []) {
+      const url = safeURL(source.url);
+      if (!url) continue;
+      const link = element('a', '', source.name || 'Первоисточник ↗');
+      link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      links.append(link);
+    }
+    if (links.children.length) card.append(links);
+    byId('findings-cards').append(card);
+  }
   async function request(path, options) { const response = await fetch(path, {cache:'no-store', credentials:'same-origin', ...options}); if (!response.ok) throw new Error(String(response.status)); return response; }
   async function loadFeed(reset) {
     if (reset) { state.generation++; state.cursor=null; state.loading=false; byId('cards').replaceChildren(); byId('count').textContent=''; }
@@ -82,6 +126,22 @@
     } catch (_) { if (generation === state.generation) { byId('feed-status').textContent='Не удалось загрузить ленту. Проверьте вход и попробуйте снова.'; byId('more').textContent='Повторить'; byId('more').hidden=false; } }
     finally { if (generation === state.generation) state.loading=false; }
   }
+  async function loadFindings(reset) {
+    if (reset) { findingsState.generation++; findingsState.cursor=null; findingsState.loading=false; byId('findings-cards').replaceChildren(); byId('findings-count').textContent=''; }
+    if (findingsState.loading) return;
+    const generation = findingsState.generation; findingsState.loading=true; byId('findings-more').hidden=true; byId('findings-status').textContent='Загружаем находки…';
+    const params = new URLSearchParams({period:byId('finding-period').value, platform:byId('finding-platform').value});
+    const optional = {importance:byId('finding-importance').value, topic:byId('finding-topic').value.trim(), verification:byId('finding-verification').value, source_type:byId('finding-source-type').value};
+    for (const [key, value] of Object.entries(optional)) if (value && value !== 'all') params.set(key, value);
+    if (findingsState.cursor) params.set('cursor', findingsState.cursor);
+    try {
+      const data = await (await request('/api/findings?' + params)).json();
+      if (generation !== findingsState.generation) return;
+      data.findings.forEach(addFinding); findingsState.cursor=data.next_cursor; byId('findings-count').textContent=`Находок: ${data.total}`;
+      byId('findings-status').textContent=data.total ? '' : 'По выбранным условиям находок пока нет.'; byId('findings-more').textContent='Показать ещё'; byId('findings-more').hidden=!findingsState.cursor;
+    } catch (_) { if (generation === findingsState.generation) { byId('findings-status').textContent='Не удалось загрузить находки. Проверьте вход и попробуйте снова.'; byId('findings-more').textContent='Повторить'; byId('findings-more').hidden=false; } }
+    finally { if (generation === findingsState.generation) findingsState.loading=false; }
+  }
   async function loadSources() {
     byId('source-status').textContent='Загружаем источники…';
     try {
@@ -91,9 +151,16 @@
       byId('source-status').textContent=data.length ? '' : 'Источников пока нет.';
     } catch (_) { byId('source-status').textContent='Не удалось загрузить источники.'; }
   }
-  function tab(name) { const feed = name === 'feed'; byId('feed').hidden=!feed; byId('about').hidden=feed; byId('nav-feed').setAttribute('aria-selected',String(feed)); byId('nav-about').setAttribute('aria-selected',String(!feed)); if (!feed) loadSources(); }
-  byId('nav-feed').addEventListener('click',()=>tab('feed')); byId('nav-about').addEventListener('click',()=>tab('about'));
+  function tab(name) {
+    const feed = name === 'feed', findings = name === 'findings', about = name === 'about';
+    byId('feed').hidden=!feed; byId('findings').hidden=!findings; byId('about').hidden=!about;
+    byId('nav-feed').setAttribute('aria-selected',String(feed)); byId('nav-findings').setAttribute('aria-selected',String(findings)); byId('nav-about').setAttribute('aria-selected',String(about));
+    if (findings) loadFindings(true); if (about) loadSources();
+  }
+  byId('nav-feed').addEventListener('click',()=>tab('feed')); byId('nav-findings').addEventListener('click',()=>tab('findings')); byId('nav-about').addEventListener('click',()=>tab('about'));
   byId('period').addEventListener('change',()=>loadFeed(true)); byId('platform').addEventListener('change',()=>loadFeed(true)); byId('more').addEventListener('click',()=>loadFeed(false));
+  for (const id of ['finding-period','finding-platform','finding-importance','finding-topic','finding-verification','finding-source-type']) byId(id).addEventListener('change',()=>loadFindings(true));
+  byId('findings-more').addEventListener('click',()=>loadFindings(false));
   async function start() {
     try { if (tg && tg.initData) await request('/miniapp/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData})}); await loadFeed(true); }
     catch (_) { byId('feed-status').textContent='Не удалось подтвердить доступ. Откройте ленту через бота.'; }

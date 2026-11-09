@@ -118,6 +118,27 @@ class WebTests(unittest.TestCase):
             basic = "Basic " + base64.b64encode(b"user:password").decode()
             self.assertEqual(self.request("GET", "/api/feed?period=all&period=today", basic)[0], 400)
 
+    def test_findings_api_requires_auth_and_validates_combined_filters(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        self.assertEqual(self.request("GET", "/api/findings")[0], 401)
+        with patch.object(web.db, "feed_findings", return_value={"findings": [], "total": 0, "next_cursor": None}) as feed:
+            status, body = self.request(
+                "GET",
+                "/api/findings?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official&limit=10",
+                basic,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["findings"], [])
+            self.assertEqual(feed.call_args.args[1:], ("week", "ozon", 4, "log", "needs_check", "official", None, 10))
+        for query in (
+            "importance=6",
+            "verification=unknown",
+            "platform=ozon&platform=wildberries",
+            "unexpected=yes",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.request("GET", "/api/findings?" + query, basic)[0], 400)
+
 
 
 if __name__ == "__main__":

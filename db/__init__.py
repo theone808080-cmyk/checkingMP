@@ -7,6 +7,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,79 @@ def _decode_feed_cursor(cursor: str) -> tuple[datetime, int, uuid.UUID]:
 
 def _encode_feed_cursor(timestamp: datetime, row_id: int, snapshot_id: uuid.UUID) -> str:
     raw = json.dumps([timestamp.isoformat(), row_id, str(snapshot_id)], separators=(',', ':')).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+
+
+_FINDING_PLATFORMS = {
+    'ozon': ('ozon',),
+    'wildberries': ('wildberries', 'wb'),
+    'yandex': ('yandex', 'yandex market', 'яндекс', 'яндекс маркет'),
+    'chestny_znak': ('chestny_znak', 'честный знак', 'crpt'),
+    'industry': ('industry', 'отрасль'),
+}
+_FINDING_PLATFORM_PATTERNS = {
+    'ozon': r'(^|[^[:alnum:]])ozon([^[:alnum:]]|$)',
+    'wildberries': r'(^|[^[:alnum:]])(wildberries|wb|вб)([^[:alnum:]]|$)',
+    'yandex': r'(^|[^[:alnum:]])(yandex|яндекс)([^[:alnum:]]|$)',
+    'chestny_znak': r'(^|[^[:alnum:]])(chestny[[:space:]_-]*znak|честный[[:space:]_-]*знак|crpt)([^[:alnum:]]|$)',
+    'industry': r'(^|[^[:alnum:]])(industry|отрасль)([^[:alnum:]]|$)',
+}
+_PLATFORM_TOKEN_ALIASES = {
+    'Ozon': (('ozon',),),
+    'Wildberries': (('wildberries',), ('wb',), ('вб',)),
+    'Яндекс Маркет': (('yandex',), ('яндекс',)),
+    'Честный знак': (('chestny_znak',), ('chestny', 'znak'), ('честный', 'знак'), ('crpt',)),
+}
+_PLATFORM_SPECIFIC_PATTERN = r'^(ozon|wildberries|wb|вб|yandex([[:space:]._-]*market)?|яндекс([[:space:]._-]*маркет)?|chestny[[:space:]_-]*znak|честный[[:space:]_-]*знак|crpt)$'
+_PLATFORM_CROSS_PATTERN = r'(межплощадочная)|(ozon.*(wildberries|wb|вб|yandex|яндекс|chestny|честный|crpt))|(wildberries.*(ozon|yandex|яндекс|chestny|честный|crpt))|(wb.*(ozon|yandex|яндекс|crpt))|(яндекс.*(ozon|wildberries|wb|crpt))'
+
+
+def normalize_event_platform(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError('invalid event platform')
+    tokens = tuple(re.findall(r'\w+', value.casefold(), flags=re.UNICODE))
+    phrases = (('all',), ('cross_platform',), ('cross', 'platform'), ('cross', 'marketplace'),
+               ('все', 'маркетплейсы'), ('все', 'площадки'))
+    if any(any(tokens[i:i + len(phrase)] == phrase for i in range(len(tokens) - len(phrase) + 1)) for phrase in phrases):
+        return 'Межплощадочная'
+    if 'industry' in tokens or 'отрасль' in tokens:
+        return 'Отрасль'
+    matches = []
+    for canonical, aliases in _PLATFORM_TOKEN_ALIASES.items():
+        if any(any(tokens[i:i + len(alias)] == alias for i in range(len(tokens) - len(alias) + 1)) for alias in aliases):
+            matches.append(canonical)
+    cross_marker = any(value in tokens for value in ('межплощадочная', 'межплощадочный', 'межплощадочные'))
+    if len(matches) > 1 or (cross_marker and matches):
+        return 'Межплощадочная: ' + ', '.join(matches)
+    if len(matches) == 1:
+        return matches[0]
+    if cross_marker:
+        return 'Межплощадочная'
+    raise ValueError('invalid event platform')
+
+
+def _finding_filter_hash(period: str, platform: str, importance: int | None,
+                         topic: str | None, verification: str | None, trust: str | None) -> str:
+    encoded = json.dumps([period, platform, importance, topic, verification, trust], ensure_ascii=False, separators=(',', ':')).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _decode_findings_cursor(cursor: str, filter_hash: str) -> tuple[uuid.UUID, int]:
+    try:
+        if not isinstance(cursor, str) or not cursor or len(cursor) > 512:
+            raise ValueError
+        raw = base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True)
+        value = json.loads(raw)
+        if (not isinstance(value, list) or len(value) != 3 or type(value[1]) is not int or value[1] < 1 or
+                value[2] != filter_hash or not isinstance(value[2], str)):
+            raise ValueError
+        return uuid.UUID(value[0]), value[1]
+    except (ValueError, TypeError, UnicodeDecodeError, binascii.Error, OverflowError, AttributeError, IndexError):
+        raise ValueError('invalid cursor') from None
+
+
+def _encode_findings_cursor(snapshot_id: uuid.UUID, offset: int, filter_hash: str) -> str:
+    raw = json.dumps([str(snapshot_id), offset, filter_hash], separators=(',', ':')).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip('=')
 
 
@@ -129,6 +203,122 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
     return {'materials': cards, 'total': total, 'next_cursor': next_cursor}
 
 
+def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: int | None = None,
+                  topic: str | None = None, verification: str | None = None, trust: str | None = None,
+                  cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+    if period not in ('all', 'today', 'week') or platform not in ('all', *_FINDING_PLATFORMS):
+        raise ValueError('invalid finding filter')
+    if importance is not None and (type(importance) is not int or not 1 <= importance <= 5):
+        raise ValueError('invalid importance')
+    if topic is not None and (not isinstance(topic, str) or not topic.strip() or len(topic) > 120):
+        raise ValueError('invalid topic')
+    if verification is not None and verification not in ('confirmed', 'needs_check'):
+        raise ValueError('invalid verification')
+    if trust is not None and trust not in ('official', 'regulator', 'industry'):
+        raise ValueError('invalid source trust')
+    if type(limit) is not int or limit < 1:
+        raise ValueError('invalid page size')
+    limit = min(limit, 20)
+    filter_hash = _finding_filter_hash(period, platform, importance, topic, verification, trust)
+    position = _decode_findings_cursor(cursor, filter_hash) if cursor is not None else None
+
+    conditions: list[str] = []
+    params: list[Any] = []
+    if period != 'all':
+        start_offset = " - INTERVAL '6 days'" if period == 'week' else ''
+        moscow_midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
+        conditions.append(
+            "EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id = pem.material_id "
+            "WHERE pem.event_id = e.id AND COALESCE(pm.published_at, pm.collected_at) >= (" +
+            moscow_midnight + start_offset + ") AT TIME ZONE 'Europe/Moscow' AND " +
+            "COALESCE(pm.published_at, pm.collected_at) < (" + moscow_midnight +
+            " + INTERVAL '1 day') AT TIME ZONE 'Europe/Moscow')"
+        )
+    if platform != 'all':
+        aliases = _FINDING_PLATFORMS[platform]
+        conditions.append('(lower(e.platform) = ANY(%s) OR lower(e.platform) ~ %s)')
+        params.extend((list(aliases), _FINDING_PLATFORM_PATTERNS[platform]))
+    if importance is not None:
+        conditions.append('e.importance = %s')
+        params.append(importance)
+    if topic is not None:
+        conditions.append('strpos(lower(e.topic), lower(%s)) > 0')
+        params.append(topic.strip())
+    if verification is not None:
+        conditions.append('e.verification = %s')
+        params.append(verification)
+    if trust is not None:
+        conditions.append(
+            'EXISTS (SELECT 1 FROM event_materials tem JOIN materials tm ON tm.id = tem.material_id '
+            'JOIN sources ts ON ts.id = tm.source_id WHERE tem.event_id = e.id AND ts.trust = %s)'
+        )
+        params.append(trust)
+    where = ' AND '.join(conditions) if conditions else 'true'
+    filtered = (
+        "filtered AS MATERIALIZED (SELECT e.id, e.platform, e.topic, e.importance, e.summary, "
+        "e.recommended_action, e.verification, e.effective_date, e.updated_at, "
+        "CASE WHEN lower(e.platform) ~ %s THEN 1 "
+        "WHEN lower(e.platform) = ANY(%s) OR lower(e.platform) ~ %s OR bool_or(s.trust = 'regulator') THEN 2 ELSE 3 END AS specificity, "
+        "json_agg(json_build_object('name', s.name, 'trust', s.trust, 'category', s.category, 'url', m.url, "
+        "'published_at', m.published_at, 'collected_at', m.collected_at) "
+        "ORDER BY COALESCE(m.published_at, m.collected_at) DESC, m.id DESC) AS sources "
+        "FROM events e JOIN event_materials em ON em.event_id = e.id "
+        "JOIN materials m ON m.id = em.material_id JOIN sources s ON s.id = m.source_id "
+        "WHERE " + where + " GROUP BY e.id) "
+    )
+    general_platforms = ['all', 'cross_platform', 'межплощадочная', 'все маркетплейсы']
+    base_params = [_PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN] + params
+    if position is None:
+        snapshot_id = uuid.uuid4()
+        event_ids = conn.execute(
+            "WITH expired AS (DELETE FROM finding_snapshots WHERE created_at < now() - INTERVAL '30 minutes'), " +
+            filtered +
+            ", snapshot AS (INSERT INTO finding_snapshots (id, filters_hash, event_ids) "
+            "SELECT %s, %s, COALESCE(array_agg(id ORDER BY specificity ASC, importance DESC, updated_at DESC, id DESC), "
+            "ARRAY[]::integer[]) FROM filtered RETURNING event_ids) SELECT event_ids FROM snapshot",
+            tuple(base_params + [snapshot_id, filter_hash]),
+        ).fetchone()[0]
+        offset = 0
+    else:
+        snapshot_id, offset = position
+        snapshot = conn.execute(
+            "SELECT event_ids FROM finding_snapshots WHERE id = %s AND filters_hash = %s "
+            "AND created_at >= now() - INTERVAL '30 minutes'",
+            (snapshot_id, filter_hash),
+        ).fetchone()
+        if snapshot is None:
+            raise ValueError('expired or invalid cursor')
+        event_ids = snapshot[0]
+    total = len(event_ids)
+    if position is not None and offset >= total:
+        raise ValueError('invalid cursor offset')
+    page_ids = event_ids[offset:offset + limit + 1]
+    has_more = len(page_ids) > limit
+    page_ids = page_ids[:limit]
+    rows = conn.execute(
+        """SELECT e.id, e.platform, e.topic, e.importance, e.summary, e.recommended_action,
+                  e.verification, e.effective_date, e.updated_at,
+                  CASE WHEN lower(e.platform) ~ %s THEN 1
+                       WHEN lower(e.platform) = ANY(%s) OR lower(e.platform) ~ %s OR bool_or(s.trust = 'regulator') THEN 2 ELSE 3 END AS specificity,
+                  json_agg(json_build_object('name', s.name, 'trust', s.trust, 'category', s.category, 'url', m.url,
+                    'published_at', m.published_at, 'collected_at', m.collected_at)
+                    ORDER BY COALESCE(m.published_at, m.collected_at) DESC, m.id DESC) AS sources
+           FROM unnest(%s::integer[]) WITH ORDINALITY AS page(event_id, ordinal)
+           JOIN events e ON e.id = page.event_id
+           JOIN event_materials em ON em.event_id = e.id
+           JOIN materials m ON m.id = em.material_id
+           JOIN sources s ON s.id = m.source_id
+           GROUP BY e.id, page.ordinal
+           ORDER BY page.ordinal""",
+        (_PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN, page_ids),
+    ).fetchall()
+    names = ('id', 'platform', 'topic', 'importance', 'summary', 'recommended_action',
+             'verification', 'effective_date', 'updated_at', 'specificity', 'sources')
+    findings = [dict(zip(names, row)) for row in rows]
+    next_cursor = _encode_findings_cursor(snapshot_id, offset + limit, filter_hash) if has_more else None
+    return {'findings': findings, 'total': total, 'next_cursor': next_cursor}
+
+
 def feed_sources(conn) -> list[dict[str, Any]]:
     rows = conn.execute('SELECT code, name, category, active, last_checked_at, last_error FROM sources ORDER BY name, id').fetchall()
     return [{'code': code, 'name': name, 'category': category,
@@ -182,10 +372,13 @@ def pending_materials(conn, limit: int = 50) -> list[dict[str, Any]]:
 def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids: Iterable[int] = (), *, reject_confirmed: bool = False) -> tuple[int, int, int]:
     created = linked = skipped = 0
     for signal in signals:
-        required = {"material_ids", "platform", "topic", "severity", "summary", "recommended_action", "verification"}
+        required = {"material_ids", "platform", "topic", "importance", "summary", "recommended_action", "verification"}
         missing = required.difference(signal)
         if missing:
             raise ValueError(f"В сигнале отсутствуют поля: {', '.join(sorted(missing))}")
+        if type(signal["importance"]) is not int or not 1 <= signal["importance"] <= 5:
+            raise ValueError("importance должен быть целым числом от 1 до 5")
+        platform = normalize_event_platform(signal["platform"])
         ids = signal["material_ids"]
         if not isinstance(ids, list) or not ids or not all(isinstance(value, int) for value in ids):
             raise ValueError("material_ids должен быть непустым списком идентификаторов")
@@ -195,11 +388,11 @@ def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids
         conflict_guard = " WHERE events.verification <> 'confirmed'" if reject_confirmed else ""
         event = conn.execute(
             """INSERT INTO events
-               (event_key, platform, topic, severity, summary, recommended_action, verification, effective_date)
+               (event_key, platform, topic, importance, summary, recommended_action, verification, effective_date)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (event_key) DO UPDATE SET updated_at = now()""" + conflict_guard + """
                RETURNING id, (xmax = 0)""",
-            (key, signal["platform"], signal["topic"], signal["severity"], signal["summary"], signal["recommended_action"], signal["verification"], signal.get("effective_date")),
+            (key, platform, signal["topic"], signal["importance"], signal["summary"], signal["recommended_action"], signal["verification"], signal.get("effective_date")),
         ).fetchone()
         if event is None:
             raise ValueError("model event collides with confirmed event")
