@@ -27,6 +27,8 @@ class Connection:
         return self
 
     def fetchall(self):
+        if self.query.startswith("SELECT id, source_id, run_id"):
+            return [(item, 101, 202) for item in self.ids]
         return [(i,) for i in self.ids]
 
 
@@ -52,12 +54,18 @@ class WorkerTests(unittest.TestCase):
         self.pending = patch.object(worker.db, "pending_materials", return_value=BATCH)
         self.importer = patch.object(worker.db, "import_signals", return_value=(1, 1, 1))
         self.filterer = patch.object(worker, "assess_pending", return_value=0)
+        self.trace_candidates = patch.object(worker.db, "pending_relevance_materials", return_value=[])
+        self.trace_writer = patch.object(worker.db, "record_trace_attempt", return_value=1)
         self.pending.start()
         self.import_mock = self.importer.start()
         self.filter_mock = self.filterer.start()
+        self.trace_candidates.start()
+        self.trace_writer.start()
         self.addCleanup(self.pending.stop)
         self.addCleanup(self.importer.stop)
         self.addCleanup(self.filterer.stop)
+        self.addCleanup(self.trace_candidates.stop)
+        self.addCleanup(self.trace_writer.stop)
         env = patch.dict(worker.os.environ, {"OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY": "secret", "OPENROUTER_MODEL": "test", "OPENROUTER_TIMEOUT": "5", "OPENROUTER_BATCH_SIZE": "2"}, clear=True)
         env.start()
         self.addCleanup(env.stop)
@@ -160,7 +168,8 @@ class WorkerTests(unittest.TestCase):
 
     def test_stale_batch_is_rejected_before_import(self):
         payload = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
-        with patch.object(self.conn, "fetchall", return_value=[(1,)]), patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
+        with patch.object(self.conn, "fetchall", side_effect=lambda: [(1, 101, 202)] if "SELECT id, source_id, run_id" in self.conn.query else [(1,)]), \
+             patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
             with self.assertRaisesRegex(ValueError, "stale"):
                 worker.process(self.conn)
         self.import_mock.assert_not_called()
@@ -219,8 +228,8 @@ class WorkerTests(unittest.TestCase):
         with patch.object(cli.db, "connect"), patch.object(cli.db, "init_schema"), \
              patch.object(cli.db, "start_cycle", return_value=1), \
              patch.object(cli, "_record_cycle_stage"), patch.object(cli, "_finish_cycle"), \
-             patch.object(cli, "collect", side_effect=lambda: calls.append("collect")), \
-             patch.object(cli, "process", side_effect=lambda: calls.append("process")):
+             patch.object(cli, "collect", side_effect=lambda **_kwargs: calls.append("collect")), \
+             patch.object(cli, "process", side_effect=lambda **_kwargs: calls.append("process")):
             cli.cycle()
         self.assertEqual(calls, ["collect", "process"])
     def test_manual_review_import_preserves_confirmed(self):

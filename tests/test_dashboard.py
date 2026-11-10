@@ -19,10 +19,10 @@ class DashboardTests(unittest.TestCase):
     def test_dashboard_renders_numeric_importance_filters_and_five_levels(self):
         class Connection:
             def execute(self, query, params=None):
-                if "SELECT e.platform" in query:
+                if "SELECT e.id, e.platform" in query:
                     self.event_query = query
                     self.event_params = params
-                    return Rows([("Ozon", "rules", 5, "Changed", "Review", "needs_check", "https://example.org/source")])
+                    return Rows([(42, "Ozon", "rules", 5, "Changed", "Review", "needs_check", "https://example.org/source")])
                 if "SELECT DISTINCT platform" in query:
                     return Rows([("Ozon",)])
                 if "SELECT count(*) FROM sources WHERE" in query:
@@ -39,6 +39,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('importance-5', body)
         self.assertIn('Важность 5', body)
         self.assertIn('https://example.org/source', body)
+        self.assertIn('/api/findings/42/trace', body)
         self.assertIn("успешных копий пока нет", body)
         self.assertIn("проверка восстановления ещё не выполнялась", body)
         self.assertEqual(conn.event_params, [5])

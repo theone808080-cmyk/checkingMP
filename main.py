@@ -182,7 +182,7 @@ def cycle() -> None:
             raise
 
         try:
-            collection = collect() or {}
+            collection = collect(cycle_id=cycle_id) or {}
             _record_cycle_stage(cycle_id, "collection", "success",
                                 items=collection.get("items", 0),
                                 source_failures=collection.get("source_failures", []),
@@ -217,7 +217,7 @@ def cycle() -> None:
                                 notification_delivered_material_ids=delivered_ids)
 
         try:
-            processing = process() or {}
+            processing = process(cycle_id=cycle_id) or {}
             _record_cycle_stage(cycle_id, "processing", "success",
                                 items=processing.get("items", 0))
         except Exception as error:

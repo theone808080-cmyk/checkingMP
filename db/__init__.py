@@ -549,9 +549,10 @@ def feed_sources(conn) -> list[dict[str, Any]]:
             for code, name, category, active, checked, error in rows]
 
 
-def start_run(conn, service: str) -> int:
+def start_run(conn, service: str, *, cycle_id: int | None = None) -> int:
     return conn.execute(
-        "INSERT INTO runs (service, status) VALUES (%s, 'started') RETURNING id", (service,)
+        "INSERT INTO runs (service, status, cycle_id) VALUES (%s, 'started', %s) RETURNING id",
+        (service, cycle_id),
     ).fetchone()[0]
 
 
@@ -777,7 +778,7 @@ def resolve_watchdog_incident(conn, incident_key: str, *, now=None) -> None:
     conn.execute("UPDATE watchdog_incidents SET active = false, resolved_at = COALESCE(%s, now()) WHERE incident_key = %s",
                  (now, incident_key))
 
-def add_material(conn, source_id: int, run_id: int, item: dict[str, Any]) -> bool:
+def add_material(conn, source_id: int, run_id: int | None, item: dict[str, Any], *, return_id: bool = False):
     body = (item.get("text") or "").strip()
     fingerprint = hashlib.sha256(
         (item["url"].strip() + "\n" + item["title"].strip() + "\n" + body).encode("utf-8")
@@ -789,7 +790,22 @@ def add_material(conn, source_id: int, run_id: int, item: dict[str, Any]) -> boo
            ON CONFLICT (fingerprint) DO NOTHING RETURNING id""",
         (source_id, run_id, item["url"], item["title"], body, item.get("published_at"), fingerprint),
     ).fetchone()
-    return row is not None
+    if not return_id:
+        return row is not None
+    if row:
+        return True, row[0]
+    existing = conn.execute("SELECT id FROM materials WHERE fingerprint=%s", (fingerprint,)).fetchone()
+    return False, existing[0] if existing else None
+
+
+def record_trace_attempt(conn, **values) -> int:
+    from db.trace import record_attempt
+    return record_attempt(conn, **values)
+
+
+def finding_trace(conn, finding_id: int) -> dict[str, Any] | None:
+    from db.trace import finding_trace as fetch_finding_trace
+    return fetch_finding_trace(conn, finding_id)
 
 
 def pending_materials(conn, limit: int = 50) -> list[dict[str, Any]]:

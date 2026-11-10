@@ -185,16 +185,81 @@ def translate(batch):
         raise RuntimeError("OpenRouter translation failed; queue unchanged") from None
 
 
-def process(conn):
+def process(conn, *, cycle_id: int | None = None):
+    relevance_started = datetime.now().astimezone()
+    relevance_failed = False
+    relevance_items = []
+    relevance_version = None
     try:
+        from judge.rules import rules_version
+        relevance_version = rules_version()
+        relevance_items = db.pending_relevance_materials(conn, relevance_version)
         assess_pending(conn)
     except Exception:
+        relevance_failed = True
         print("Local relevance filter failed; AI processing continues")
     _, _, _, _, limit, _ = settings()
     batch = db.pending_materials(conn, limit)
     if not batch:
         return (0, 0, 0)
-    payload = validate(infer(batch), batch)
+    source_context = {row[0]: (row[1], row[2]) for row in conn.execute(
+        "SELECT id, source_id, run_id FROM materials WHERE id = ANY(%s)",
+        (list({item["material_id"] for item in relevance_items + batch}),),
+    ).fetchall()}
+    relevance_finished = datetime.now().astimezone()
+    traced_relevance = relevance_items or (batch if relevance_failed else [])
+    for item in traced_relevance:
+        db.record_trace_attempt(
+            conn, cycle_id=cycle_id, run_id=source_context.get(item["material_id"], (None, None))[1],
+            source_id=source_context.get(item["material_id"], (None, None))[0],
+            material_id=item["material_id"], stage="relevance",
+            status="failed" if relevance_failed else "success",
+            started_at=relevance_started, finished_at=relevance_finished,
+            error_code="relevance_failed" if relevance_failed else None,
+            rule_version=relevance_version,
+        )
+    analysis_started = datetime.now().astimezone()
+    model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4.1-nano")[:120]
+    try:
+        payload = validate(infer(batch), batch)
+    except Exception:
+        analysis_finished = datetime.now().astimezone()
+        for item in batch:
+            db.record_trace_attempt(
+                conn, cycle_id=cycle_id, run_id=source_context.get(item["material_id"], (None, None))[1],
+                source_id=source_context.get(item["material_id"], (None, None))[0],
+                material_id=item["material_id"], stage="analysis", status="failed",
+                started_at=analysis_started, finished_at=analysis_finished,
+                error_code="analysis_failed", provider="openrouter", model=model,
+            )
+            if item.get("translation_status") == "pending":
+                db.record_trace_attempt(
+                    conn, cycle_id=cycle_id, run_id=source_context.get(item["material_id"], (None, None))[1],
+                    source_id=source_context.get(item["material_id"], (None, None))[0],
+                    material_id=item["material_id"], stage="translation", status="failed",
+                    started_at=analysis_started, finished_at=analysis_finished,
+                    error_code="translation_failed", provider="openrouter", model=model,
+                )
+        raise
+    analysis_finished = datetime.now().astimezone()
+    for item in batch:
+        db.record_trace_attempt(
+            conn, cycle_id=cycle_id, run_id=source_context.get(item["material_id"], (None, None))[1],
+            source_id=source_context.get(item["material_id"], (None, None))[0],
+            material_id=item["material_id"], stage="analysis", status="success",
+            started_at=analysis_started, finished_at=analysis_finished,
+            provider="openrouter", model=model,
+        )
+    translated_ids = {item["material_id"] for item in payload["translations"]}
+    for item in batch:
+        if item["material_id"] in translated_ids:
+            db.record_trace_attempt(
+                conn, cycle_id=cycle_id, run_id=source_context.get(item["material_id"], (None, None))[1],
+                source_id=source_context.get(item["material_id"], (None, None))[0],
+                material_id=item["material_id"], stage="translation", status="success",
+                started_at=analysis_started, finished_at=analysis_finished,
+                provider="openrouter", model=model,
+            )
     with conn.transaction():
         ids = [item["material_id"] for item in batch]
         rows = conn.execute("SELECT id FROM materials WHERE id = ANY(%s) AND status = 'new' ORDER BY id FOR UPDATE", (ids,)).fetchall()
@@ -205,9 +270,9 @@ def process(conn):
 
 
 
-def main():
+def main(*, cycle_id: int | None = None):
     with db.connect() as conn:
         db.init_schema(conn)
-        created, linked, skipped = process(conn)
+        created, linked, skipped = process(conn, cycle_id=cycle_id)
     print(f"Events created: {created}; materials linked: {linked}; skipped: {skipped}")
     return {"items": linked + skipped, "events": created}

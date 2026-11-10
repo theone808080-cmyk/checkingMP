@@ -59,9 +59,9 @@ class NotificationTests(unittest.TestCase):
         calls = []
         with self.cycle_storage(), \
              patch.object(main, "prepare_notifications", side_effect=lambda: calls.append("baseline")), \
-             patch.object(main, "collect", side_effect=lambda: calls.append("collect")), \
+             patch.object(main, "collect", side_effect=lambda **_kwargs: calls.append("collect")), \
              patch.object(main, "send_notifications", side_effect=lambda _config, **_kwargs: calls.append("notify") or "skipped"), \
-             patch.object(main, "process", side_effect=lambda: calls.append("process")):
+             patch.object(main, "process", side_effect=lambda **_kwargs: calls.append("process")):
             main.cycle()
         self.assertEqual(calls, ["baseline", "collect", "notify", "process"])
     def test_payload_and_network_failure_do_not_expose_token(self):

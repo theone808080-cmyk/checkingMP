@@ -8,6 +8,7 @@ import binascii
 import hmac
 import json
 import os
+import re
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie, CookieError
@@ -44,7 +45,7 @@ def render(conn, filters: dict[str, str]) -> str:
             params.append(value)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     events = conn.execute(
-        f"""SELECT e.platform, e.topic, e.importance, e.summary, e.recommended_action, e.verification,
+        f"""SELECT e.id, e.platform, e.topic, e.importance, e.summary, e.recommended_action, e.verification,
                    string_agg(DISTINCT m.url, E'\\n')
             FROM events e JOIN event_materials em ON em.event_id=e.id JOIN materials m ON m.id=em.material_id
             {where}
@@ -52,7 +53,7 @@ def render(conn, filters: dict[str, str]) -> str:
         params,
     ).fetchall()
     event_rows = []
-    for platform, topic, importance, summary, action, verification, urls in events:
+    for finding_id, platform, topic, importance, summary, action, verification, urls in events:
         links = "<br>".join(
             f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noreferrer">источник</a>'
             for url in urls.split("\n")
@@ -60,7 +61,8 @@ def render(conn, filters: dict[str, str]) -> str:
         event_rows.append(
             f'<tr><td><span class="importance importance-{importance}" aria-label="Важность {importance}">{importance}</span></td><td><b>{html.escape(platform)}</b><br>'
             f'<span class="tag">{html.escape(topic)}</span><br><span class="tag">{html.escape(verification)}</span></td>'
-            f'<td>{html.escape(summary)}</td><td>{html.escape(action)}</td><td>{links}</td></tr>'
+            f'<td>{html.escape(summary)}</td><td>{html.escape(action)}</td>'
+            f'<td>{links}<br><a href="/api/findings/{int(finding_id)}/trace">путь обработки</a></td></tr>'
         )
     if not event_rows:
         event_rows.append('<tr><td colspan="5">Сигналов по выбранному фильтру пока нет</td></tr>')
@@ -263,6 +265,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.authorized():
             self.reject_auth()
+            return
+        trace_match = re.fullmatch(r"/api/findings/([1-9][0-9]*)/trace", parsed.path)
+        if trace_match:
+            try:
+                with db.connect() as conn:
+                    result = db.finding_trace(conn, int(trace_match.group(1)))
+                if result is None:
+                    self.json_response(404, {"error": "not found"})
+                else:
+                    self.json_response(200, result)
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
             return
         if parsed.path != "/":
             self.json_response(404, {"error": "not found"})

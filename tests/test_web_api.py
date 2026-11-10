@@ -149,6 +149,22 @@ class WebTests(unittest.TestCase):
             status, body = self.request("GET", "/sources/review", basic)
         self.assertEqual((status, body), (200, b"review page"))
 
+    def test_processing_trace_is_basic_auth_only_and_read_only(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        path = "/api/findings/12/trace"
+        self.assertEqual(self.request("GET", path)[0], 401)
+        with patch.dict(web.os.environ, {"TELEGRAM_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "42"}):
+            session = web.telegram_auth.new_session(TOKEN, "42")
+            self.assertEqual(self.request("GET", path, headers={"Cookie": f"radar_session={session}"})[0], 401)
+        result = {"finding": {"id": 12}, "materials": []}
+        with patch.object(web.db, "finding_trace", return_value=result) as fetch:
+            status, body = self.request("GET", path, basic)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), result)
+        fetch.assert_called_once_with(self.conn, 12)
+        with patch.object(web.db, "finding_trace", return_value=None):
+            self.assertEqual(self.request("GET", "/api/findings/12/trace", basic)[0], 404)
+
     def test_source_approval_requires_same_origin_and_server_probe(self):
         from source_discovery.probe import ProbeResult
 

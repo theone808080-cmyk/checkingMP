@@ -1,4 +1,6 @@
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from collector.main import fetch, read_html, read_telegram
@@ -76,3 +78,55 @@ class CollectorCycleTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(finished[2], "finished")
         self.assertEqual(processed, 1)
+
+
+class CollectorTraceTests(unittest.TestCase):
+    def test_material_collection_records_cycle_run_source_and_material_ids(self):
+        from collector import main as collector
+        from unittest.mock import MagicMock
+
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [
+            (3, "source", "rss", "https://example.test/feed", "source", "config")
+        ]
+        with patch.object(collector.db, "connect") as connect, \
+             patch.object(collector.db, "init_schema"), patch.object(collector.db, "sync_sources"), \
+             patch.object(collector.db, "start_run", return_value=12) as start_run, \
+             patch.object(collector.db, "add_material", return_value=(True, 42)), \
+             patch.object(collector.db, "record_trace_attempt") as trace, \
+             patch.object(collector.db, "finish_run"), \
+             patch.dict(collector.READERS, {"rss": lambda _url: [{"url": "https://example.test/story", "title": "Story", "text": "Text"}]}, clear=True):
+            connect.return_value.__enter__.return_value = conn
+            result = collector.main(cycle_id=9)
+        self.assertEqual(result["items"], 1)
+        start_run.assert_called_once_with(conn, "collector", cycle_id=9)
+        trace.assert_called_once()
+        args = trace.call_args.kwargs
+        self.assertEqual((args["cycle_id"], args["run_id"], args["source_id"], args["material_id"]), (9, 12, 3, 42))
+        self.assertEqual((args["stage"], args["status"]), ("collection", "success"))
+
+    def test_source_failure_records_safe_trace_error_without_exception_text(self):
+        from collector import main as collector
+        from unittest.mock import MagicMock
+
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [
+            (3, "source", "rss", "https://example.test/feed", "source", "config")
+        ]
+        output = StringIO()
+        with patch.object(collector.db, "connect") as connect, \
+             patch.object(collector.db, "init_schema"), patch.object(collector.db, "sync_sources"), \
+             patch.object(collector.db, "start_run", return_value=12), \
+             patch.object(collector.db, "record_trace_attempt") as trace, \
+             patch.object(collector.db, "finish_run") as finish_run, \
+             patch.dict(collector.READERS, {"rss": lambda _url: (_ for _ in ()).throw(RuntimeError("Bearer secret prompt"))}, clear=True):
+            connect.return_value.__enter__.return_value = conn
+            with redirect_stdout(output):
+                with self.assertRaisesRegex(RuntimeError, "No sources"):
+                    collector.main(cycle_id=9)
+        self.assertEqual(trace.call_args.kwargs["error_code"], "source_fetch_failed")
+        self.assertNotIn("secret", repr(trace.call_args.kwargs))
+        self.assertNotIn("prompt", repr(trace.call_args.kwargs))
+        self.assertNotIn("secret", output.getvalue())
+        self.assertNotIn("prompt", output.getvalue())
+        self.assertNotIn("secret", repr(finish_run.call_args))

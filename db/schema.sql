@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS cycles (
     finished_at TIMESTAMPTZ
 );
 
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS cycle_id BIGINT REFERENCES cycles(id);
+
 ALTER TABLE cycles ADD COLUMN IF NOT EXISTS source_failure_signatures JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE cycles ADD COLUMN IF NOT EXISTS notification_checked_at TIMESTAMPTZ;
 ALTER TABLE cycles ADD COLUMN IF NOT EXISTS notification_attempted BOOLEAN NOT NULL DEFAULT false;
@@ -112,6 +114,41 @@ CREATE TABLE IF NOT EXISTS materials (
     fingerprint TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'done', 'skipped', 'failed'))
 );
+
+CREATE TABLE IF NOT EXISTS processing_trace (
+    id BIGSERIAL PRIMARY KEY,
+    cycle_id BIGINT REFERENCES cycles(id),
+    run_id INTEGER REFERENCES runs(id),
+    source_id INTEGER REFERENCES sources(id),
+    material_id INTEGER REFERENCES materials(id),
+    stage TEXT NOT NULL CHECK (stage IN ('collection', 'translation', 'relevance', 'analysis')),
+    status TEXT NOT NULL CHECK (status IN ('success', 'failed', 'skipped')),
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ NOT NULL,
+    error_code TEXT,
+    error_summary TEXT,
+    provider TEXT,
+    model TEXT,
+    rule_version TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (finished_at >= started_at),
+    CHECK ((status = 'failed' AND error_code IS NOT NULL AND error_summary IS NOT NULL)
+        OR (status <> 'failed' AND error_code IS NULL AND error_summary IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS processing_trace_material_idx ON processing_trace (material_id, id);
+
+CREATE OR REPLACE FUNCTION reject_processing_trace_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'processing_trace is append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS processing_trace_append_only ON processing_trace;
+CREATE TRIGGER processing_trace_append_only
+    BEFORE UPDATE OR DELETE ON processing_trace
+    FOR EACH ROW EXECUTE FUNCTION reject_processing_trace_mutation();
 
 ALTER TABLE materials ADD COLUMN IF NOT EXISTS translation_status TEXT NOT NULL DEFAULT 'legacy';
 ALTER TABLE materials ADD COLUMN IF NOT EXISTS title_ru TEXT;
