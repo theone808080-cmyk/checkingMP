@@ -915,6 +915,53 @@ def health(conn) -> dict[str, int]:
     return {"sources": sources, "materials": materials, "events": events, "pending": pending}
 
 
+def start_backup_run(conn) -> int:
+    return conn.execute(
+        "INSERT INTO backup_runs (status) VALUES ('started') RETURNING id"
+    ).fetchone()[0]
+
+
+def finish_backup_run(conn, run_id: int, *, status: str, file_name: str | None = None,
+                      size_bytes: int | None = None, sha256: str | None = None,
+                      error_code: str | None = None) -> None:
+    if status not in {"success", "failed"}:
+        raise ValueError("invalid backup status")
+    conn.execute(
+        """UPDATE backup_runs SET status=%s, file_name=%s, finished_at=now(), size_bytes=%s,
+                  sha256=%s, error_code=%s WHERE id=%s""",
+        (status, file_name, size_bytes, sha256, error_code, run_id),
+    )
+
+
+def latest_backup_status(conn) -> dict[str, Any]:
+    row = conn.execute(
+        """SELECT
+               (SELECT status FROM backup_runs ORDER BY id DESC LIMIT 1),
+               (SELECT error_code FROM backup_runs ORDER BY id DESC LIMIT 1),
+               (SELECT finished_at FROM backup_runs WHERE status='success' ORDER BY id DESC LIMIT 1),
+               (SELECT finished_at FROM backup_runs WHERE status='success' ORDER BY id ASC LIMIT 1),
+               (SELECT size_bytes FROM backup_runs WHERE status='success' ORDER BY id DESC LIMIT 1),
+               (SELECT sha256 FROM backup_runs WHERE status='success' ORDER BY id DESC LIMIT 1),
+               (SELECT restore_status FROM backup_runs WHERE status='success' AND restore_checked_at IS NOT NULL
+                ORDER BY restore_checked_at DESC, id DESC LIMIT 1),
+               (SELECT restore_checked_at FROM backup_runs WHERE status='success' AND restore_checked_at IS NOT NULL
+                ORDER BY restore_checked_at DESC, id DESC LIMIT 1)"""
+    ).fetchone()
+    keys = ("last_status", "last_error_code", "last_success_at", "first_success_at", "last_success_size_bytes",
+            "last_success_sha256", "last_restore_status", "last_restore_checked_at")
+    return dict(zip(keys, row))
+
+
+def mark_backup_restore(conn, run_id: int, *, status: str, error_code: str | None = None) -> None:
+    if status not in {"success", "failed"}:
+        raise ValueError("invalid restore status")
+    conn.execute(
+        """UPDATE backup_runs SET restore_status=%s, restore_checked_at=now(),
+                  error_code=COALESCE(%s, error_code) WHERE id=%s AND status='success'""",
+        (status, error_code, run_id),
+    )
+
+
 def pending_relevance_materials(conn, rules_version: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """SELECT m.id, m.url, m.title, m.text, m.published_at,

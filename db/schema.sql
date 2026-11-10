@@ -87,6 +87,19 @@ CREATE TABLE IF NOT EXISTS watchdog_incidents (
     recovery_sent_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS backup_runs (
+    id BIGSERIAL PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed')),
+    file_name TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    size_bytes BIGINT CHECK (size_bytes IS NULL OR size_bytes >= 0),
+    sha256 TEXT,
+    restore_status TEXT NOT NULL DEFAULT 'pending' CHECK (restore_status IN ('pending', 'success', 'failed')),
+    restore_checked_at TIMESTAMPTZ,
+    error_code TEXT
+);
+
 CREATE TABLE IF NOT EXISTS materials (
     id SERIAL PRIMARY KEY,
     source_id INTEGER NOT NULL REFERENCES sources(id),

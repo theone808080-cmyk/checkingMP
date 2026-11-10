@@ -20,6 +20,8 @@ from watchdog.logic import CYCLE_STALE_AFTER, evaluate, restart_due
 CHECK_INTERVAL_SECONDS = 300
 HEALTH_TIMEOUT_SECONDS = 10
 HEARTBEAT_MAX_AGE = timedelta(minutes=10)
+BACKUP_STALE_AFTER = timedelta(hours=36)
+BACKUP_RESTORE_STALE_AFTER = timedelta(days=35)
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,22 @@ def sync_incidents(conn, desired: dict[str, str], send_notice, *,
                 db.mark_watchdog_notice_sent(conn, key, recovered=True, now=now)
 
 
+def backup_incidents(status: dict, *, now: datetime) -> dict[str, str]:
+    incidents = {}
+    last_success = status.get("last_success_at")
+    if status.get("last_status") == "failed":
+        incidents["backup_failed"] = "Последнее резервное копирование завершилось ошибкой. Проверьте защищённый статус и настройки задачи."
+    if last_success is None or now - last_success > BACKUP_STALE_AFTER:
+        incidents["backup_stale"] = "Нет успешной резервной копии за последние 36 часов."
+    if status.get("last_restore_status") == "failed":
+        incidents["backup_restore_failed"] = "Последняя проверка восстановления резервной копии завершилась ошибкой."
+    checked_at = status.get("last_restore_checked_at")
+    reference = checked_at or status.get("first_success_at")
+    if reference and now - reference > BACKUP_RESTORE_STALE_AFTER:
+        incidents["backup_restore_stale"] = "Проверка восстановления не выполнялась более 35 дней."
+    return incidents
+
+
 def _default_sender(settings: Settings):
     def send(key: str, text: str, recovered: bool = False) -> bool:
         return send_telegram_alert(settings.telegram_token, settings.telegram_chat_id, text)
@@ -252,6 +270,7 @@ def check_once(settings: Settings, *, now: datetime | None = None,
                                stuck_cycles=stuck_cycles)
             if db.has_unresolved_notification_failure(conn):
                 desired["telegram_delivery"] = "Обнаружен цикл с неподтверждённой доставкой уведомления в Telegram."
+            desired.update(backup_incidents(db.latest_backup_status(conn), now=current))
             failures = 0 if app_available else runtime["failed_checks"] + 1
             attempted = False if app_available else runtime["restart_attempted"]
             if not app_available and restart_due(app_available=False, database_available=True,

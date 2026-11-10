@@ -2,11 +2,22 @@ from datetime import datetime, timedelta, timezone
 import unittest
 
 from watchdog.logic import evaluate, restart_due
+from watchdog.service import backup_incidents
 
 
 class WatchdogLogicTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
+
+    def test_backup_watch_reports_stale_failures_and_old_restore_checks(self):
+        stale = backup_incidents({"last_status": "failed", "last_success_at": self.now - timedelta(days=2),
+                                  "last_restore_status": "failed",
+                                  "last_restore_checked_at": self.now - timedelta(days=40)}, now=self.now)
+        self.assertEqual(set(stale), {"backup_failed", "backup_stale", "backup_restore_failed", "backup_restore_stale"})
+        healthy = backup_incidents({"last_status": "success", "last_success_at": self.now - timedelta(hours=1),
+                                    "last_restore_status": "success",
+                                    "last_restore_checked_at": self.now - timedelta(days=2)}, now=self.now)
+        self.assertEqual(healthy, {})
 
     def test_restart_requires_three_failures_and_healthy_database(self):
         self.assertFalse(restart_due(app_available=False, database_available=True,

@@ -30,7 +30,8 @@ class DashboardTests(unittest.TestCase):
                 return Rows([])
 
         conn = Connection()
-        with patch.object(web.db, "health", return_value={"sources": 1, "materials": 1, "events": 1, "pending": 0}):
+        with patch.object(web.db, "health", return_value={"sources": 1, "materials": 1, "events": 1, "pending": 0}), \
+             patch.object(web.db, "latest_backup_status", return_value={"last_status": "success", "last_success_size_bytes": 2048}):
             body = web.render(conn, {"importance": "5"})
         self.assertIn('name="importance"', body)
         for level in range(1, 6):
@@ -38,6 +39,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('importance-5', body)
         self.assertIn('Важность 5', body)
         self.assertIn('https://example.org/source', body)
+        self.assertIn("успешных копий пока нет", body)
+        self.assertIn("проверка восстановления ещё не выполнялась", body)
         self.assertEqual(conn.event_params, [5])
 
     def test_source_review_escapes_candidate_text_and_links(self):

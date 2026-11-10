@@ -17,6 +17,7 @@ from worker.main import main as process, probe, translate
 from watchdog.service import Settings as WatchdogSettings, container_healthcheck, run as run_watchdog
 from judge.main import import_labels, prepare_review as prepare_judge_sample, report as relevance_report
 from source_discovery.main import discover_sources as run_source_discovery
+from backup.service import Settings as BackupSettings, backup_once, verify_latest
 
 WORK = Path(__file__).with_name("work")
 
@@ -34,6 +35,22 @@ def watchdog() -> None:
 def discover_sources() -> None:
     created, errors = run_source_discovery()
     print(f"Новых кандидатов: {created}; каналов с ошибкой: {errors}")
+
+
+def create_backup() -> None:
+    settings = BackupSettings.from_env()
+    with db.connect() as conn:
+        db.init_schema(conn)
+        result = backup_once(conn, settings)
+    print(f"Резервная копия создана: {result['file_name']}; размер: {result['size_bytes']} байт")
+
+
+def verify_backup() -> None:
+    settings = BackupSettings.from_env()
+    with db.connect() as conn:
+        db.init_schema(conn)
+        result = verify_latest(conn, settings)
+    print(f"Проверка восстановления пройдена: копия {result['id']}")
 
 
 def check_container_health() -> None:
@@ -230,12 +247,14 @@ COMMANDS = {
     "watchdog": watchdog,
     "container-healthcheck": check_container_health,
     "discover-sources": discover_sources,
+    "backup": create_backup,
+    "verify-backup": verify_backup,
 }
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | prepare-judge-review [limit] | import-judge-labels <файл> | judge-report | discover-sources | web | health | watchdog | container-healthcheck")
+        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | prepare-judge-review [limit] | import-judge-labels <файл> | judge-report | discover-sources | backup | verify-backup | web | health | watchdog | container-healthcheck")
     command = sys.argv[1]
     if command == "import-review":
         if len(sys.argv) != 3:

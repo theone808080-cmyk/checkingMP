@@ -21,6 +21,13 @@ from web import telegram_auth
 
 def render(conn, filters: dict[str, str]) -> str:
     counts = db.health(conn)
+    backup = db.latest_backup_status(conn)
+    backup_stamp = (backup["last_success_at"].strftime("%d.%m.%Y %H:%M UTC")
+                    if backup.get("last_success_at") else "успешных копий пока нет")
+    restore_stamp = (backup["last_restore_checked_at"].strftime("%d.%m.%Y %H:%M UTC")
+                     if backup.get("last_restore_checked_at") else "проверка восстановления ещё не выполнялась")
+    restore_label = {"success": "пройдена", "failed": "ошибка"}.get(
+        backup.get("last_restore_status"), "ожидает проверки")
     unhealthy = conn.execute("SELECT count(*) FROM sources WHERE last_error IS NOT NULL").fetchone()[0]
     clauses, params = [], []
     for field in ("platform", "importance", "verification"):
@@ -76,6 +83,7 @@ def render(conn, filters: dict[str, str]) -> str:
 body{{font-family:system-ui,sans-serif;max-width:1180px;margin:auto;padding:24px;background:#f6f5f1;color:#191919}}h1{{margin-bottom:4px}}.muted{{color:#666}}.stats,.filters{{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}}.stat,.filter{{background:#fff;padding:10px;border:1px solid #ddd}}table{{width:100%;border-collapse:collapse;background:#fff}}th,td{{padding:10px;text-align:left;border-bottom:1px solid #ddd;vertical-align:top}}th{{background:#ecebe5}}a{{color:#1a4a6b}}.importance{{display:inline-flex;align-items:center;justify-content:center;width:2em;height:2em;border-radius:4px;color:#111;font-weight:700}}.importance-1{{background:#b9c1c7}}.importance-2{{background:#78b7e8}}.importance-3{{background:#f2d45c}}.importance-4{{background:#f49a4b}}.importance-5{{background:#ee6666}}.tag{{font-size:12px;background:#e4ecef;padding:2px 5px}}form{{display:flex;gap:8px;flex-wrap:wrap}}select,button{{padding:6px}}
 </style></head><body><h1>Радар маркетплейсов и «Честного Знака»</h1><p class="muted">Ручной пилот: сигналы созданы после проверки агентом. Не является юридическим заключением.</p>
 <div class="stats"><div class="stat">Источники: <b>{counts['sources']}</b></div><div class="stat">Материалы: <b>{counts['materials']}</b></div><div class="stat">Сигналы: <b>{counts['events']}</b></div><div class="stat">Ожидают разбора: <b>{counts['pending']}</b></div><div class="stat">Недоступно: <b>{unhealthy}</b></div></div>
+<h2>Резервное копирование</h2><p>Последняя успешная копия: {html.escape(backup_stamp)}; размер: {int(backup.get('last_success_size_bytes') or 0)} байт. Проверка восстановления: {html.escape(restore_label)} ({html.escape(restore_stamp)}).</p>
 <div class="filters"><form method="get"><label>Площадка <select name="platform"><option value="">Все</option>{options(platforms, filters.get('platform', ''))}</select></label><label>Важность <select name="importance"><option value="">Все</option>{options(('1','2','3','4','5'), filters.get('importance', ''))}</select></label><label>Проверка <select name="verification"><option value="">Все</option>{options(('confirmed','needs_check'), filters.get('verification', ''))}</select></label><button>Фильтровать</button></form></div>
 <table><tr><th>Важность</th><th>Площадка и тема</th><th>Что изменилось</th><th>Что сделать</th><th>Источники</th></tr>{''.join(event_rows)}</table>
 <h2>Статус источников</h2><table><tr><th>Источник</th><th>Доверие</th><th>Последняя проверка</th><th>Ошибка</th></tr>{''.join(source_rows)}</table></body></html>"""
