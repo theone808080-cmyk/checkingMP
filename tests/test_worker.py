@@ -51,10 +51,13 @@ class WorkerTests(unittest.TestCase):
         self.actual_import = worker.db.import_signals
         self.pending = patch.object(worker.db, "pending_materials", return_value=BATCH)
         self.importer = patch.object(worker.db, "import_signals", return_value=(1, 1, 1))
+        self.filterer = patch.object(worker, "assess_pending", return_value=0)
         self.pending.start()
         self.import_mock = self.importer.start()
+        self.filter_mock = self.filterer.start()
         self.addCleanup(self.pending.stop)
         self.addCleanup(self.importer.stop)
+        self.addCleanup(self.filterer.stop)
         env = patch.dict(worker.os.environ, {"OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY": "secret", "OPENROUTER_MODEL": "test", "OPENROUTER_TIMEOUT": "5", "OPENROUTER_BATCH_SIZE": "2"}, clear=True)
         env.start()
         self.addCleanup(env.stop)
@@ -110,6 +113,24 @@ class WorkerTests(unittest.TestCase):
         body = json.loads(request.data)
         self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/chat/completions")
         self.assertIn("Translate non-Russian content into Russian", body["messages"][0]["content"])
+    def test_shadow_filter_runs_before_model_processing(self):
+        calls = []
+        payload = {"signals": [{**SIGNAL, "material_ids": [1]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        with patch.object(worker, "assess_pending", create=True, side_effect=lambda _conn: calls.append("filter")), \
+             patch.object(worker, "infer", side_effect=lambda _batch: calls.append("model") or payload):
+            result = worker.process(self.conn)
+
+        self.assertEqual(result, (1, 1, 1))
+        self.assertEqual(calls, ["filter", "model"])
+
+    def test_filter_failure_does_not_stop_model_processing(self):
+        payload = {"signals": [{**SIGNAL, "material_ids": [1]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        with patch.object(worker, "assess_pending", create=True, side_effect=RuntimeError("filter failed")) as filter_mock, \
+             patch.object(worker, "infer", return_value=payload):
+            result = worker.process(self.conn)
+
+        self.assertEqual(result, (1, 1, 1))
+        filter_mock.assert_called_once_with(self.conn)
 
     def test_model_importance_must_be_integer_between_one_and_five(self):
         for value in range(1, 6):

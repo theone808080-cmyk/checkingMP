@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from datetime import date, datetime
 
 import db
+from judge.main import assess_pending
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -185,6 +186,10 @@ def translate(batch):
 
 
 def process(conn):
+    try:
+        assess_pending(conn)
+    except Exception:
+        print("Local relevance filter failed; AI processing continues")
     _, _, _, _, limit, _ = settings()
     batch = db.pending_materials(conn, limit)
     if not batch:
