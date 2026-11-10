@@ -179,6 +179,7 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
     results = conn.execute(
         'WITH ' + snapshot + ', filtered AS MATERIALIZED ('
         'SELECT m.id, m.title, m.text, m.url, m.published_at, m.collected_at, '
+        'm.translation_status, m.title_ru, m.text_ru, '
         's.name AS source, s.category, COALESCE(m.published_at, m.collected_at) AS sort_date '
         'FROM materials m JOIN sources s ON s.id = m.source_id CROSS JOIN snapshot WHERE m.id = ANY(snapshot.material_ids)) '
         'SELECT snapshot.id, cardinality(snapshot.material_ids), page.* FROM snapshot '
@@ -192,7 +193,8 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
     rows = [row[2:] for row in results if row[2] is not None]
     has_more = len(rows) > limit
     rows = rows[:limit]
-    names = ('id', 'title', 'text', 'url', 'published_at', 'collected_at', 'source', 'category', 'sort_date')
+    names = ('id', 'title', 'text', 'url', 'published_at', 'collected_at', 'translation_status',
+             'title_ru', 'text_ru', 'source', 'category', 'sort_date')
     cards = [dict(zip(names, row)) for row in rows]
     for card in cards:
         card.pop('sort_date')
@@ -348,8 +350,8 @@ def add_material(conn, source_id: int, run_id: int, item: dict[str, Any]) -> boo
     ).hexdigest()
     row = conn.execute(
         """INSERT INTO materials
-           (source_id, run_id, url, title, text, published_at, fingerprint)
-           VALUES (%s, %s, %s, %s, %s, %s, %s)
+           (source_id, run_id, url, title, text, published_at, fingerprint, translation_status)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
            ON CONFLICT (fingerprint) DO NOTHING RETURNING id""",
         (source_id, run_id, item["url"], item["title"], body, item.get("published_at"), fingerprint),
     ).fetchone()
@@ -359,17 +361,71 @@ def add_material(conn, source_id: int, run_id: int, item: dict[str, Any]) -> boo
 def pending_materials(conn, limit: int = 50) -> list[dict[str, Any]]:
     rows = conn.execute(
         """SELECT m.id, m.url, m.title, m.text, m.published_at,
+                  m.translation_status,
                   s.code, s.name, s.trust, s.scope
            FROM materials m JOIN sources s ON s.id = m.source_id
            WHERE m.status = 'new'
            ORDER BY m.published_at DESC NULLS LAST, m.id DESC LIMIT %s""",
         (limit,),
     ).fetchall()
-    columns = ("material_id", "url", "title", "text", "published_at", "source_code", "source", "trust", "scope")
+    columns = ("material_id", "url", "title", "text", "published_at", "translation_status",
+               "source_code", "source", "trust", "scope")
     return [dict(zip(columns, row)) for row in rows]
 
 
-def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids: Iterable[int] = (), *, reject_confirmed: bool = False) -> tuple[int, int, int]:
+def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids: Iterable[int] = (), *,
+                   translations: Iterable[dict[str, Any]] = (), reject_confirmed: bool = False) -> tuple[int, int, int]:
+    signals = list(signals)
+    skipped_material_ids = list(skipped_material_ids)
+    translations = list(translations)
+    for signal in signals:
+        if not isinstance(signal, dict) or type(signal.get("importance")) is not int or not 1 <= signal["importance"] <= 5:
+            raise ValueError("importance должен быть целым числом от 1 до 5")
+    translation_ids = []
+    for translation in translations:
+        if not isinstance(translation, dict) or not {'material_id', 'title_ru', 'text_ru'}.issubset(translation):
+            raise ValueError("Material translation is missing required fields")
+        material_id = translation['material_id']
+        title_ru, text_ru = translation['title_ru'], translation['text_ru']
+        if (type(material_id) is not int or not isinstance(title_ru, str) or not title_ru.strip() or
+                not isinstance(text_ru, str) or len(text_ru) > 400 or material_id in translation_ids):
+            raise ValueError("Invalid material translation")
+        translation_ids.append(material_id)
+    if translation_ids:
+        pending_rows = conn.execute(
+            "SELECT id, text FROM materials WHERE id = ANY(%s) AND status = 'new' "
+            "AND translation_status = 'pending' FOR UPDATE",
+            (translation_ids,),
+        ).fetchall()
+        pending_text = {row[0]: row[1] for row in pending_rows}
+        if set(pending_text) != set(translation_ids):
+            raise ValueError("Translation is not for a new pending material")
+        for translation in translations:
+            if (pending_text[translation['material_id']] or "")[:400].strip() and not translation['text_ru'].strip():
+                raise ValueError("text_ru обязателен для непустого текста материала")
+    referenced_ids = set()
+    for signal in signals:
+        ids = signal.get("material_ids", []) if isinstance(signal, dict) else []
+        if isinstance(ids, list):
+            referenced_ids.update(value for value in ids if type(value) is int)
+    referenced_ids.update(value for value in skipped_material_ids if type(value) is int)
+    untranslated = set()
+    if referenced_ids:
+        untranslated = {row[0] for row in conn.execute(
+            "SELECT id FROM materials WHERE id = ANY(%s) AND status = 'new' AND translation_status = 'pending' FOR UPDATE",
+            (list(referenced_ids),),
+        ).fetchall()} - set(translation_ids)
+    if untranslated:
+        raise ValueError("translation is required for new materials")
+    if translation_ids:
+        for translation in translations:
+            row = conn.execute(
+                """UPDATE materials SET title_ru = %s, text_ru = %s, translation_status = 'ready'
+                   WHERE id = %s AND status = 'new' AND translation_status = 'pending' RETURNING id""",
+                (translation['title_ru'], translation['text_ru'], translation['material_id']),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Материал перестал ожидать перевод")
     created = linked = skipped = 0
     for signal in signals:
         required = {"material_ids", "platform", "topic", "importance", "summary", "recommended_action", "verification"}

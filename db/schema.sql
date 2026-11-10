@@ -36,6 +36,22 @@ CREATE TABLE IF NOT EXISTS materials (
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'done', 'skipped', 'failed'))
 );
 
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS translation_status TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS title_ru TEXT;
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS text_ru TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'materials'::regclass AND conname = 'materials_translation_status_check'
+    ) THEN
+        ALTER TABLE materials ADD CONSTRAINT materials_translation_status_check
+            CHECK (translation_status IN ('legacy', 'pending', 'ready'));
+    END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS events (
     id SERIAL PRIMARY KEY,
     event_key TEXT NOT NULL UNIQUE,

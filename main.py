@@ -12,7 +12,7 @@ import db
 from collector.main import main as collect
 from notifier import telegram
 from web.main import main as web
-from worker.main import main as process, probe
+from worker.main import main as process, probe, translate
 
 WORK = Path(__file__).with_name("work")
 
@@ -41,9 +41,17 @@ def import_review(path: str) -> None:
     skipped = payload.get("skipped_material_ids", [])
     if not isinstance(skipped, list):
         raise ValueError("skipped_material_ids должен быть массивом")
+    referenced_ids = set(skipped)
+    for signal in signals:
+        if isinstance(signal, dict) and isinstance(signal.get("material_ids"), list):
+            referenced_ids.update(signal["material_ids"])
     with db.connect() as conn:
         db.init_schema(conn)
-        created, linked, skipped_count = db.import_signals(conn, signals, skipped)
+        pending = db.pending_materials(conn, limit=max(50, len(referenced_ids)))
+        translation_batch = [item for item in pending
+                             if item["material_id"] in referenced_ids and item.get("translation_status") == "pending"]
+        translations = translate(translation_batch)
+        created, linked, skipped_count = db.import_signals(conn, signals, skipped, translations=translations)
     print(f"Импортировано событий: {created}; связано материалов: {linked}; пропущено: {skipped_count}")
 
 

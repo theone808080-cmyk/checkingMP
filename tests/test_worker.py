@@ -30,7 +30,14 @@ class Connection:
         return [(i,) for i in self.ids]
 
 
-BATCH = [{"material_id": 1, "title": "Example"}, {"material_id": 2, "title": "Other"}]
+BATCH = [
+    {"material_id": 1, "title": "Example", "translation_status": "pending", "text": "English excerpt"},
+    {"material_id": 2, "title": "Другая новость", "translation_status": "pending", "text": "Другой текст"},
+]
+TRANSLATIONS = [
+    {"material_id": 1, "title_ru": "Пример", "text_ru": "Английский фрагмент"},
+    {"material_id": 2, "title_ru": "Другая новость", "text_ru": "Другой текст"},
+]
 SIGNAL = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "importance": 3, "summary": "Summary", "recommended_action": "Check", "verification": "needs_check"}
 
 
@@ -53,8 +60,9 @@ class WorkerTests(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def test_valid_completion_and_request(self):
-        signal = {**SIGNAL, "platform": "WB/Ozon"}
-        payload = {"signals": [signal], "skipped_material_ids": [2]}
+        signal = {**SIGNAL, "platform": "WB/Ozon", "topic": "Логистика",
+                  "summary": "Изменились условия доставки", "recommended_action": "Проверить отгрузки"}
+        payload = {"signals": [signal], "skipped_material_ids": [2], "translations": TRANSLATIONS}
         with patch.object(worker, "open_url", return_value=response(json.dumps(payload))) as http:
             self.assertEqual(worker.process(self.conn), (1, 1, 1))
         req = http.call_args.args[0]
@@ -65,30 +73,63 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(json.loads(req.data)["response_format"], {"type": "json_object"})
         self.assertEqual(json.loads(req.data)["max_tokens"], 2500)
         self.assertEqual(json.loads(req.data)["model"], "test")
-        self.assertIn("importance (integer 1-5", json.loads(req.data)["messages"][0]["content"])
+        prompt = json.loads(req.data)["messages"][0]["content"]
+        self.assertIn("importance (integer 1-5", prompt)
+        self.assertIn("in Russian", prompt)
         imported_signal = {**signal, "platform": "Межплощадочная: Ozon, Wildberries", "verification": "needs_check"}
-        self.import_mock.assert_called_once_with(self.conn, [imported_signal], [2], reject_confirmed=True)
+        self.import_mock.assert_called_once_with(self.conn, [imported_signal], [2], translations=TRANSLATIONS, reject_confirmed=True)
         self.assertEqual(self.conn.transactions, 1)
+
+    def test_requires_complete_unique_translations_for_pending_materials(self):
+        valid = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        result = worker.validate(valid, BATCH)
+        self.assertEqual(result["translations"], TRANSLATIONS)
+        long_title = "Н" * 501
+        long_title_result = worker.validate({**valid, "translations": [
+            {**TRANSLATIONS[0], "title_ru": long_title}, TRANSLATIONS[1]
+        ]}, BATCH)
+        self.assertEqual(long_title_result["translations"][0]["title_ru"], long_title)
+        invalid = (
+            [],
+            [TRANSLATIONS[0]],
+            [TRANSLATIONS[0], TRANSLATIONS[0]],
+            [TRANSLATIONS[0], {**TRANSLATIONS[1], "material_id": 99}],
+            [{**TRANSLATIONS[0], "title_ru": " "}, TRANSLATIONS[1]],
+            [{**TRANSLATIONS[0], "text_ru": ""}, TRANSLATIONS[1]],
+            [{**TRANSLATIONS[0], "text_ru": "x" * 401}, TRANSLATIONS[1]],
+        )
+        for translations in invalid:
+            with self.subTest(translations=translations), self.assertRaises(ValueError):
+                worker.validate({**valid, "translations": translations}, BATCH)
+
+    def test_translation_only_call_uses_existing_model_and_validates_results(self):
+        payload = {"translations": TRANSLATIONS}
+        with patch.object(worker, "open_url", return_value=response(json.dumps(payload))) as http:
+            self.assertEqual(worker.translate(BATCH), TRANSLATIONS)
+        request = http.call_args.args[0]
+        body = json.loads(request.data)
+        self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertIn("Translate non-Russian content into Russian", body["messages"][0]["content"])
 
     def test_model_importance_must_be_integer_between_one_and_five(self):
         for value in range(1, 6):
             with self.subTest(value=value):
-                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": []}
+                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": [], "translations": TRANSLATIONS}
                 self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["importance"], value)
         invalid_values = (None, True, False, 0, 6, 2.5, "3")
         for value in invalid_values:
             with self.subTest(value=value), self.assertRaises(ValueError):
-                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": []}
+                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": [], "translations": TRANSLATIONS}
                 worker.validate(payload, BATCH)
         with self.assertRaises(ValueError):
-            payload = {"signals": [{key: value for key, value in SIGNAL.items() if key != "importance"}], "skipped_material_ids": []}
+            payload = {"signals": [{key: value for key, value in SIGNAL.items() if key != "importance"}], "skipped_material_ids": [], "translations": TRANSLATIONS}
             worker.validate(payload, BATCH)
 
     def test_model_platforms_are_canonicalized_and_unknown_values_rejected(self):
         for source, expected in (("Яндекс.Маркет", "Яндекс Маркет"), ("WB/Ozon", "Межплощадочная: Ozon, Wildberries")):
-            payload = {"signals": [{**SIGNAL, "platform": source}], "skipped_material_ids": []}
+            payload = {"signals": [{**SIGNAL, "platform": source}], "skipped_material_ids": [], "translations": TRANSLATIONS}
             self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["platform"], expected)
-        payload = {"signals": [{**SIGNAL, "platform": "unknown marketplace"}], "skipped_material_ids": []}
+        payload = {"signals": [{**SIGNAL, "platform": "unknown marketplace"}], "skipped_material_ids": [], "translations": TRANSLATIONS}
         with self.assertRaises(ValueError):
             worker.validate(payload, BATCH)
 
@@ -97,7 +138,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(worker.settings()[2], "openai/gpt-4.1-nano")
 
     def test_stale_batch_is_rejected_before_import(self):
-        payload = {"signals": [SIGNAL], "skipped_material_ids": [2]}
+        payload = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
         with patch.object(self.conn, "fetchall", return_value=[(1,)]), patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
             with self.assertRaisesRegex(ValueError, "stale"):
                 worker.process(self.conn)
@@ -111,6 +152,8 @@ class WorkerTests(unittest.TestCase):
                 return self
             def fetchone(self):
                 return None
+            def fetchall(self):
+                return []
         conn = ConflictConnection()
         with self.assertRaisesRegex(ValueError, "confirmed"):
             self.actual_import(conn, [SIGNAL], reject_confirmed=True)
@@ -137,7 +180,7 @@ class WorkerTests(unittest.TestCase):
     def test_model_verification_is_always_unconfirmed_locally(self):
         for value in ("confirmed", "unexpected", None):
             signal = {**SIGNAL, "verification": value}
-            payload = {"signals": [signal], "skipped_material_ids": [2]}
+            payload = {"signals": [signal], "skipped_material_ids": [2], "translations": TRANSLATIONS}
             with self.subTest(value=value), patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
                 worker.process(self.conn)
                 self.assertEqual(self.import_mock.call_args.args[1][0]["verification"], "needs_check")
@@ -159,10 +202,11 @@ class WorkerTests(unittest.TestCase):
     def test_manual_review_import_preserves_confirmed(self):
         signal = {**SIGNAL, "verification": "confirmed"}
         payload = {"signals": [signal], "skipped_material_ids": []}
-        with patch.object(cli.Path, "read_text", return_value=json.dumps(payload)), patch.object(cli.db, "connect") as connect, patch.object(cli.db, "init_schema"):
+        with patch.object(cli.Path, "read_text", return_value=json.dumps(payload)), patch.object(cli.db, "connect") as connect, patch.object(cli.db, "init_schema"), patch.object(cli, "translate", return_value=TRANSLATIONS[:1]) as translate:
             conn = connect.return_value.__enter__.return_value
             cli.import_review("review.json")
-            self.import_mock.assert_called_once_with(conn, [signal], [])
+            translate.assert_called_once_with([BATCH[0]])
+            self.import_mock.assert_called_once_with(conn, [signal], [], translations=TRANSLATIONS[:1])
 
     def test_failures_never_import(self):
         invalid = ["```json\n{}\n```", '{"signals": [], "signals": [], "skipped_material_ids": []}', json.dumps({"signals": [SIGNAL], "skipped_material_ids": [1]}), json.dumps({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": []}), json.dumps({"signals": [{**SIGNAL, "importance": 9}], "skipped_material_ids": []})]
