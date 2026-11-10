@@ -229,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if parsed.path in ("/api/feed", "/api/findings", "/api/sources"):
+        if parsed.path in ("/api/feed", "/api/findings", "/api/findings/counts", "/api/sources"):
             if not (self.authorized() or self.session_authorized()):
                 self.reject_auth()
                 return
@@ -237,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
                 params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=10)
                 if parsed.path == "/api/feed":
                     allowed = {"period", "platform", "cursor", "limit"}
-                elif parsed.path == "/api/findings":
+                elif parsed.path in ("/api/findings", "/api/findings/counts"):
                     allowed = {"period", "platform", "importance", "topic", "verification", "source_type", "cursor", "limit"}
                 else:
                     allowed = set()
@@ -247,14 +247,27 @@ class Handler(BaseHTTPRequestHandler):
                     if parsed.path == "/api/feed":
                         limit = int(params.get("limit", ["20"])[0])
                         result = db.feed_materials(conn, params.get("period", ["all"])[0], params.get("platform", ["all"])[0], params.get("cursor", [None])[0], limit)
-                    elif parsed.path == "/api/findings":
+                    elif parsed.path in ("/api/findings", "/api/findings/counts"):
                         importance = int(params["importance"][0]) if "importance" in params else None
                         limit = int(params.get("limit", ["20"])[0])
-                        result = db.feed_findings(
-                            conn, params.get("period", ["all"])[0], params.get("platform", ["all"])[0], importance,
-                            params.get("topic", [None])[0], params.get("verification", [None])[0],
-                            params.get("source_type", [None])[0], params.get("cursor", [None])[0], limit,
-                        )
+                        filters = {
+                            "period": params.get("period", ["all"])[0],
+                            "platform": params.get("platform", ["all"])[0],
+                            "importance": importance,
+                            "topic": params.get("topic", [None])[0],
+                            "verification": params.get("verification", [None])[0],
+                            "trust": params.get("source_type", [None])[0],
+                        }
+                        if parsed.path == "/api/findings/counts":
+                            if "cursor" in params or "limit" in params:
+                                raise ValueError("pagination is not supported for counts")
+                            result = db.finding_filter_counts(conn, filters)
+                        else:
+                            result = db.feed_findings(
+                                conn, filters["period"], filters["platform"], filters["importance"],
+                                filters["topic"], filters["verification"], filters["trust"],
+                                params.get("cursor", [None])[0], limit,
+                            )
                     else:
                         result = db.feed_sources(conn)
                 self.json_response(200, result)

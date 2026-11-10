@@ -141,6 +141,24 @@ class WebTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertEqual(self.request("GET", "/api/findings?" + query, basic)[0], 400)
 
+    def test_finding_counts_api_uses_findings_authorization_and_filters(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        path = "/api/findings/counts?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official"
+        expected = {"period": {"all": 1}, "platform": {"all": 1}, "importance": {"all": 1},
+                    "topic_status": {"topics": [], "verification": {"all": 1}}, "source_type": {"all": 1}}
+        self.assertEqual(self.request("GET", "/api/findings/counts")[0], 401)
+        with patch.object(web.db, "finding_filter_counts", return_value=expected, create=True) as count:
+            status, body = self.request("GET", path, basic)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), expected)
+        count.assert_called_once_with(self.conn, {
+            "period": "week", "platform": "ozon", "importance": 4, "topic": "log",
+            "verification": "needs_check", "trust": "official",
+        })
+        for query in ("importance=0", "cursor=old", "unexpected=yes", "period=week&period=today"):
+            with self.subTest(query=query):
+                self.assertEqual(self.request("GET", "/api/findings/counts?" + query, basic)[0], 400)
+
     def test_source_review_page_requires_basic_auth(self):
         basic = "Basic " + base64.b64encode(b"user:password").decode()
         self.assertEqual(self.request("GET", "/sources/review")[0], 401)

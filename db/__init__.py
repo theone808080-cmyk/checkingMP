@@ -425,6 +425,97 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
     return {'materials': cards, 'total': total, 'next_cursor': next_cursor}
 
 
+def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return full-result counts for each finding filter, ignoring its own group."""
+    filters = dict(filters or {})
+    period = filters.get('period', 'all')
+    platform = filters.get('platform', 'all')
+    importance = filters.get('importance')
+    topic = filters.get('topic')
+    verification = filters.get('verification')
+    trust = filters.get('trust')
+    if period not in ('all', 'today', 'week') or platform not in ('all', *_FINDING_PLATFORMS):
+        raise ValueError('invalid finding filter')
+    if importance is not None and (type(importance) is not int or not 1 <= importance <= 5):
+        raise ValueError('invalid importance')
+    if topic is not None and (not isinstance(topic, str) or not topic.strip() or len(topic) > 120):
+        raise ValueError('invalid topic')
+    if verification is not None and verification not in ('confirmed', 'needs_check'):
+        raise ValueError('invalid verification')
+    if trust is not None and trust not in ('official', 'regulator', 'industry'):
+        raise ValueError('invalid source trust')
+
+    def where_for(exclude: str, extra: str | None = None, extra_params: tuple[Any, ...] = ()):
+        clauses = []
+        values: list[Any] = []
+        if exclude != 'period' and period != 'all':
+            midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
+            start = " - INTERVAL '6 days'" if period == 'week' else ''
+            clauses.append(
+                "EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id = pem.material_id "
+                "WHERE pem.event_id=e.id AND COALESCE(pm.published_at,pm.collected_at) >= (" + midnight + start +
+                ") AT TIME ZONE 'Europe/Moscow' AND COALESCE(pm.published_at,pm.collected_at) < (" + midnight +
+                " + INTERVAL '1 day') AT TIME ZONE 'Europe/Moscow')"
+            )
+        if exclude != 'platform' and platform != 'all':
+            clauses.append('(lower(e.platform)=ANY(%s) OR lower(e.platform) ~ %s)')
+            values.extend((list(_FINDING_PLATFORMS[platform]), _FINDING_PLATFORM_PATTERNS[platform]))
+        if exclude != 'importance' and importance is not None:
+            clauses.append('e.importance=%s'); values.append(importance)
+        if exclude != 'topic_status' and topic is not None:
+            clauses.append('strpos(lower(e.topic),lower(%s))>0'); values.append(topic.strip())
+        if exclude != 'topic_status' and verification is not None:
+            clauses.append('e.verification=%s'); values.append(verification)
+        if exclude != 'source_type' and trust is not None:
+            clauses.append("EXISTS (SELECT 1 FROM event_materials tem JOIN materials tm ON tm.id=tem.material_id JOIN sources ts ON ts.id=tm.source_id WHERE tem.event_id=e.id AND ts.trust=%s)")
+            values.append(trust)
+        if extra:
+            clauses.append(extra); values.extend(extra_params)
+        return (' AND '.join(clauses) if clauses else 'true'), tuple(values)
+
+    def count(exclude: str, extra: str | None = None, args: tuple[Any, ...] = ()):
+        where, values = where_for(exclude, extra, args)
+        return conn.execute(
+            'SELECT count(DISTINCT e.id) FROM events e JOIN event_materials em ON em.event_id=e.id '
+            'JOIN materials m ON m.id=em.material_id JOIN sources s ON s.id=m.source_id WHERE ' + where,
+            values,
+        ).fetchone()[0]
+
+    result: dict[str, Any] = {}
+    result['period'] = {'all': count('period')}
+    for value in ('today', 'week'):
+        midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
+        start = " - INTERVAL '6 days'" if value == 'week' else ''
+        clause = (
+            "EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id=pem.material_id "
+            "WHERE pem.event_id=e.id AND COALESCE(pm.published_at,pm.collected_at) >= (" + midnight + start +
+            ") AT TIME ZONE 'Europe/Moscow' AND COALESCE(pm.published_at,pm.collected_at) < (" + midnight +
+            " + INTERVAL '1 day') AT TIME ZONE 'Europe/Moscow')"
+        )
+        result['period'][value] = count('period', clause)
+    result['platform'] = {'all': count('platform')}
+    for value in _FINDING_PLATFORMS:
+        result['platform'][value] = count('platform', '(lower(e.platform)=ANY(%s) OR lower(e.platform) ~ %s)',
+                                          (list(_FINDING_PLATFORMS[value]), _FINDING_PLATFORM_PATTERNS[value]))
+    result['importance'] = {'all': count('importance')}
+    for value in range(1, 6):
+        result['importance'][str(value)] = count('importance', 'e.importance=%s', (value,))
+    result['source_type'] = {'all': count('source_type')}
+    for value in ('official', 'regulator', 'industry'):
+        result['source_type'][value] = count('source_type', 's.trust=%s', (value,))
+    result['topic_status'] = {'verification': {'all': count('topic_status')}}
+    for value in ('confirmed', 'needs_check'):
+        result['topic_status']['verification'][value] = count('topic_status', 'e.verification=%s', (value,))
+    where, values = where_for('topic_status')
+    topics = conn.execute(
+        'SELECT e.topic, count(DISTINCT e.id) FROM events e JOIN event_materials em ON em.event_id=e.id '
+        'JOIN materials m ON m.id=em.material_id JOIN sources s ON s.id=m.source_id WHERE ' + where +
+        ' GROUP BY e.topic ORDER BY lower(e.topic), e.topic', values,
+    ).fetchall()
+    result['topic_status']['topics'] = [{'value': row[0], 'count': row[1]} for row in topics]
+    return result
+
+
 def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: int | None = None,
                   topic: str | None = None, verification: str | None = None, trust: str | None = None,
                   cursor: str | None = None, limit: int = 20) -> dict[str, Any]:

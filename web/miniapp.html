@@ -11,19 +11,19 @@
     * { box-sizing:border-box; } body { margin:0; font:16px/1.5 system-ui,sans-serif; color:var(--fg); background:var(--bg); }
     .wrap { max-width:740px; margin:auto; padding:24px 16px 100px; } header { margin:4px 0 24px; } .eyebrow { color:var(--accent); font-size:12px; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
     h1 { font-size:clamp(25px,6vw,36px); line-height:1.14; margin:8px 0; letter-spacing:-.035em; } h2 { font-size:22px; } p { margin:8px 0; } .muted { color:var(--muted); }
-    .filters { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:20px 0; } label { display:grid; gap:5px; color:var(--muted); font-size:13px; font-weight:600; }
+    .filters { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:20px 0; } .filter-group { min-width:0; margin:0; padding:12px; border:1px solid var(--line); border-radius:10px; } .filter-group legend { padding:0 5px; color:var(--accent); font-size:14px; font-weight:700; } label { display:grid; gap:5px; color:var(--muted); font-size:13px; font-weight:600; }
     select,button { font:inherit; } select { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
     .card, .source, .about { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin:10px 0; overflow-wrap:anywhere; }
     .meta { color:var(--muted); font-size:13px; } .card h3 { font-size:18px; line-height:1.3; margin:9px 0; } .card p { white-space:pre-line; } a { color:var(--accent); font-weight:650; } .card a { display:inline-block; margin-top:10px; }
     input { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
     .finding-level { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; } .importance-square { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border:1px solid #59656b55; border-radius:5px; color:#142027; }
     .importance-1 { background:#b9c1c7; } .importance-2 { background:#79b9e7; } .importance-3 { background:#f4d35e; } .importance-4 { background:#f4a261; } .importance-5 { background:#ef6c68; }
-    .finding-sources { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:8px; }
+    .finding-sources { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:8px; } .topic-options { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 8px; } .topic-chip { border:1px solid var(--line); border-radius:999px; padding:5px 9px; color:var(--fg); background:var(--card); font-size:13px; cursor:pointer; } .topic-chip[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
     .actions { text-align:center; margin:20px 0; } .more { background:var(--accent); color:var(--button-text); border:0; border-radius:10px; padding:11px 20px; font-weight:700; cursor:pointer; }
     .status { color:var(--muted); min-height:1.5em; } .bottom { position:fixed; bottom:0; left:0; right:0; display:flex; justify-content:center; gap:8px; background:var(--card); border-top:1px solid var(--line); padding:8px 12px calc(8px + env(safe-area-inset-bottom)); }
     .bottom button { flex:1; max-width:220px; padding:10px; border:0; border-radius:9px; color:var(--muted); background:transparent; font-weight:700; cursor:pointer; } .bottom button[aria-selected="true"] { color:var(--accent); background:var(--bg); }
-    [hidden] { display:none !important; } button:focus-visible,select:focus-visible,a:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
-    @media (max-width:360px) { .filters { grid-template-columns:1fr; } }
+    [hidden] { display:none !important; } button:focus-visible,select:focus-visible,input:focus-visible,a:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+    @media (max-width:520px) { .finding-filter-groups { grid-template-columns:1fr; } } @media (max-width:360px) { .filters { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
@@ -40,13 +40,12 @@
   <section id="findings" aria-label="Находки" hidden>
     <h2>Находки</h2>
     <p class="muted">Краткие сводки по изменениям. Неподтверждённые находки требуют проверки.</p>
-    <div class="filters">
-      <label>Период<select id="finding-period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label>
-      <label>Площадка<select id="finding-platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label>
-      <label>Важность<select id="finding-importance"><option value="all">Все уровни</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label>
-      <label>Тема<input id="finding-topic" type="search" maxlength="120" placeholder="Найти по теме"></label>
-      <label>Проверка<select id="finding-verification"><option value="all">Любой статус</option><option value="confirmed">Подтверждено</option><option value="needs_check">Нужно проверить</option></select></label>
-      <label>Тип источника<select id="finding-source-type"><option value="all">Все источники</option><option value="official">Официальный</option><option value="regulator">Регуляторный</option><option value="industry">Отраслевой</option></select></label>
+    <div class="filters finding-filter-groups">
+      <fieldset class="filter-group"><legend>Период</legend><label>Когда опубликовано<select id="finding-period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Маркетплейс</legend><label>Площадка<select id="finding-platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Важность</legend><label>Уровень<select id="finding-importance"><option value="all">Все уровни</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Тема и статус находки</legend><label>Тема<input id="finding-topic" type="search" maxlength="120" placeholder="Найти по теме"></label><div id="finding-topic-options" class="topic-options" role="group" aria-label="Доступные темы"></div><label>Проверка<select id="finding-verification"><option value="all">Любой статус</option><option value="confirmed">Подтверждено</option><option value="needs_check">Нужно проверить</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Тип источника</legend><label>Надёжность источника<select id="finding-source-type"><option value="all">Все источники</option><option value="official">Официальный</option><option value="regulator">Регуляторный</option><option value="industry">Отраслевой</option></select></label></fieldset>
     </div>
     <p id="findings-count" class="muted" aria-live="polite"></p><div id="findings-cards"></div><p id="findings-status" class="status" role="status"></p>
     <div class="actions"><button id="findings-more" class="more" type="button" hidden>Показать ещё</button></div>
@@ -129,6 +128,29 @@
     } catch (_) { if (generation === state.generation) { byId('feed-status').textContent='Не удалось загрузить ленту. Проверьте вход и попробуйте снова.'; byId('more').textContent='Повторить'; byId('more').hidden=false; } }
     finally { if (generation === state.generation) state.loading=false; }
   }
+  function updateFindingFilterCounts(counts) {
+    const groups = {'finding-period':counts.period, 'finding-platform':counts.platform,
+      'finding-importance':counts.importance, 'finding-verification':counts.topic_status && counts.topic_status.verification,
+      'finding-source-type':counts.source_type};
+    for (const [id, values] of Object.entries(groups)) {
+      const select=byId(id); if (!select || !select.options || !values) continue;
+      for (const option of select.options) {
+        if (!option.dataset.baseLabel) option.dataset.baseLabel=option.textContent.replace(/\s+\(\d+\)$/, '');
+        const count=values[option.value]; if (count != null) option.textContent=`${option.dataset.baseLabel} (${count})`;
+      }
+    }
+    const topicOptions=byId('finding-topic-options');
+    if (topicOptions && counts.topic_status && Array.isArray(counts.topic_status.topics)) {
+      topicOptions.replaceChildren();
+      for (const item of counts.topic_status.topics) {
+        const selected=byId('finding-topic').value.trim() === item.value;
+        const chip=element('button','topic-chip',`${item.value} (${item.count})`);
+        chip.type='button'; chip.setAttribute('aria-pressed',String(selected));
+        chip.addEventListener('click',()=>{byId('finding-topic').value=item.value; byId('finding-verification').value='all'; loadFindings(true);});
+        topicOptions.append(chip);
+      }
+    }
+  }
   async function loadFindings(reset) {
     if (reset) { findingsState.generation++; findingsState.cursor=null; findingsState.loading=false; byId('findings-cards').replaceChildren(); byId('findings-count').textContent=''; }
     if (findingsState.loading) return;
@@ -137,9 +159,15 @@
     const optional = {importance:byId('finding-importance').value, topic:byId('finding-topic').value.trim(), verification:byId('finding-verification').value, source_type:byId('finding-source-type').value};
     for (const [key, value] of Object.entries(optional)) if (value && value !== 'all') params.set(key, value);
     if (findingsState.cursor) params.set('cursor', findingsState.cursor);
+    const countParams = new URLSearchParams(params);
+    countParams.delete('cursor');
     try {
-      const data = await (await request('/api/findings?' + params)).json();
+      const [feedResponse, countResponse] = await Promise.all([
+        request('/api/findings?' + params), request('/api/findings/counts?' + countParams)
+      ]);
+      const [data, counts] = await Promise.all([feedResponse.json(), countResponse.json()]);
       if (generation !== findingsState.generation) return;
+      updateFindingFilterCounts(counts);
       data.findings.forEach(addFinding); findingsState.cursor=data.next_cursor; byId('findings-count').textContent=`Находок: ${data.total}`;
       byId('findings-status').textContent=data.total ? '' : 'По выбранным условиям находок пока нет.'; byId('findings-more').textContent='Показать ещё'; byId('findings-more').hidden=!findingsState.cursor;
     } catch (_) { if (generation === findingsState.generation) { byId('findings-status').textContent='Не удалось загрузить находки. Проверьте вход и попробуйте снова.'; byId('findings-more').textContent='Повторить'; byId('findings-more').hidden=false; } }
@@ -162,7 +190,9 @@
   }
   byId('nav-feed').addEventListener('click',()=>tab('feed')); byId('nav-findings').addEventListener('click',()=>tab('findings')); byId('nav-about').addEventListener('click',()=>tab('about'));
   byId('period').addEventListener('change',()=>loadFeed(true)); byId('platform').addEventListener('change',()=>loadFeed(true)); byId('more').addEventListener('click',()=>loadFeed(false));
-  for (const id of ['finding-period','finding-platform','finding-importance','finding-topic','finding-verification','finding-source-type']) byId(id).addEventListener('change',()=>loadFindings(true));
+  for (const id of ['finding-period','finding-platform','finding-importance','finding-source-type']) byId(id).addEventListener('change',()=>loadFindings(true));
+  byId('finding-topic').addEventListener('change',()=>{byId('finding-verification').value='all'; loadFindings(true);});
+  byId('finding-verification').addEventListener('change',()=>{byId('finding-topic').value=''; loadFindings(true);});
   byId('findings-more').addEventListener('click',()=>loadFindings(false));
   async function start() {
     try { if (tg && tg.initData) await request('/miniapp/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData})}); await loadFeed(true); }
