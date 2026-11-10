@@ -1,10 +1,21 @@
 import unittest
 from unittest.mock import patch
 
-from collector.main import read_html, read_telegram
+from collector.main import fetch, read_html, read_telegram
 
 
 class CollectorParsingTests(unittest.TestCase):
+    def test_collection_uses_pinned_public_fetch_with_response_bound(self):
+        with patch("collector.main.fetch_public", return_value=b"feed") as safe_fetch:
+            self.assertEqual(fetch("https://example.test/feed", safe=True), b"feed")
+        safe_fetch.assert_called_once_with("https://example.test/feed", timeout=30, max_bytes=2_000_000)
+
+    def test_config_sources_keep_existing_fetch_path(self):
+        with patch("collector.main.urllib.request.urlopen") as open_url:
+            open_url.return_value.__enter__.return_value.read.return_value = b"feed"
+            self.assertEqual(fetch("https://example.test/feed"), b"feed")
+        open_url.assert_called_once_with("https://example.test/feed", timeout=30)
+
     def test_telegram_preview_extracts_post_and_text(self):
         page = '''<div data-post="demo_channel/42"><div class="tgme_widget_message_text js-message_text">Новое <b>правило</b></div></div>'''
         with patch("collector.main.fetch", return_value=page.encode("utf-8")):
@@ -47,7 +58,7 @@ class CollectorCycleTests(unittest.TestCase):
     def test_all_failed_sources_stop_cycle_and_mark_run_failed(self):
         def failed(url):
             raise OSError("unavailable")
-        error, finished, processed = self.run_cycle([(1, "one", "rss", "https://example.test", "one")], {"rss": failed})
+        error, finished, processed = self.run_cycle([(1, "one", "rss", "https://example.test", "one", "config")], {"rss": failed})
         self.assertIsNotNone(error)
         self.assertEqual(finished[2], "failed")
         self.assertEqual(processed, 0)
@@ -61,7 +72,7 @@ class CollectorCycleTests(unittest.TestCase):
     def test_partial_failure_allows_cycle_when_source_read(self):
         def failed(url):
             raise OSError("unavailable")
-        error, finished, processed = self.run_cycle([(1, "one", "bad", "https://example.test", "one"), (2, "two", "good", "https://example.test", "two")], {"bad": failed, "good": lambda url: []})
+        error, finished, processed = self.run_cycle([(1, "one", "bad", "https://example.test", "one", "config"), (2, "two", "good", "https://example.test", "two", "config")], {"bad": failed, "good": lambda url: []})
         self.assertIsNone(error)
         self.assertEqual(finished[2], "finished")
         self.assertEqual(processed, 1)

@@ -25,7 +25,7 @@ class FeedPostgresTests(unittest.TestCase):
             id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
             kind TEXT NOT NULL, url TEXT NOT NULL, trust TEXT NOT NULL, scope TEXT NOT NULL,
             active BOOLEAN DEFAULT true, last_checked_at TIMESTAMPTZ, last_error TEXT,
-            category TEXT)""")
+            category TEXT, managed_by TEXT NOT NULL DEFAULT 'config')""")
         self.conn.execute("""CREATE TEMP TABLE materials (
             id SERIAL PRIMARY KEY, source_id INTEGER NOT NULL, url TEXT NOT NULL,
             title TEXT NOT NULL, text TEXT, published_at TIMESTAMPTZ,

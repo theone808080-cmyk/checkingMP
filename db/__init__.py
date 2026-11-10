@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 import psycopg
 
@@ -38,14 +39,231 @@ def sync_sources(conn) -> int:
     sources = json.loads(SOURCE_CONFIG.read_text(encoding="utf-8"))
     for source in sources:
         conn.execute(
-            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active)
-               VALUES (%(code)s, %(name)s, %(kind)s, %(url)s, %(trust)s, %(scope)s, %(category)s, true)
+            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by)
+               VALUES (%(code)s, %(name)s, %(kind)s, %(url)s, %(trust)s, %(scope)s, %(category)s, true, 'config')
                ON CONFLICT (code) DO UPDATE SET
                  name = EXCLUDED.name, kind = EXCLUDED.kind, url = EXCLUDED.url,
-                 trust = EXCLUDED.trust, scope = EXCLUDED.scope, category = EXCLUDED.category""",
+                 trust = EXCLUDED.trust, scope = EXCLUDED.scope, category = EXCLUDED.category
+               WHERE sources.managed_by = 'config'""",
             source,
         )
     return len(sources)
+
+
+def _candidate_domain(value: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > 253:
+        raise ValueError("invalid publisher domain")
+    value = value.strip().rstrip(".").lower()
+    try:
+        domain = value.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("invalid publisher domain") from None
+    if any(not part or len(part) > 63 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", part)
+           for part in domain.split(".")):
+        raise ValueError("invalid publisher domain")
+    return domain
+
+
+def _candidate_collection_url(value: str, domain: str) -> str:
+    if not isinstance(value, str) or len(value) > 2048:
+        raise ValueError("invalid collection URL")
+    parsed = urlparse(value.strip())
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("invalid collection URL") from None
+    if (parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password
+            or port not in (None, 443)):
+        raise ValueError("invalid collection URL")
+    try:
+        parsed.hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("invalid collection URL") from None
+    return parsed._replace(scheme="https", fragment="").geturl()
+
+
+def _candidate_examples(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("invalid candidate examples")
+    result = []
+    for url in value:
+        if not isinstance(url, str) or len(url) > 2048:
+            continue
+        parsed = urlparse(url)
+        if (parsed.scheme.lower() not in ("http", "https") or not parsed.hostname
+                or parsed.username or parsed.password):
+            continue
+        if url not in result:
+            result.append(url)
+        if len(result) == 10:
+            break
+    return result
+
+
+def upsert_source_candidates(conn, candidates: list[dict[str, Any]]) -> int:
+    created = 0
+    known_domains = set()
+    for (source_url,) in conn.execute("SELECT url FROM sources WHERE active").fetchall():
+        try:
+            known_domains.add(_candidate_domain(urlparse(source_url).hostname or ""))
+        except ValueError:
+            continue
+    for candidate in candidates:
+        domain = _candidate_domain(candidate.get("publisher_domain"))
+        if domain in known_domains:
+            continue
+        already_reviewed = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM source_candidates WHERE publisher_domain=%s AND status IN ('approved','rejected'))",
+            (domain,),
+        ).fetchone()[0]
+        if already_reviewed:
+            continue
+        collection_url = _candidate_collection_url(candidate.get("collection_url"), domain)
+        name = candidate.get("name")
+        kind = candidate.get("kind", "html")
+        category = candidate.get("category", "industry")
+        trust = candidate.get("trust", "industry")
+        scope = candidate.get("scope", "marketplaces")
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            raise ValueError("invalid candidate name")
+        if kind not in ("rss", "html", "telegram") or trust not in ("official", "regulator", "industry"):
+            raise ValueError("invalid candidate type")
+        if not isinstance(category, str) or not category or len(category) > 80:
+            raise ValueError("invalid candidate category")
+        if not isinstance(scope, str) or not scope or len(scope) > 300:
+            raise ValueError("invalid candidate scope")
+        examples = _candidate_examples(candidate.get("example_urls", []))
+        row = conn.execute(
+            """INSERT INTO source_candidates
+                 (publisher_domain, collection_url, name, kind, category, trust, scope, examples)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+               ON CONFLICT (publisher_domain, collection_url) DO UPDATE SET
+                 name = CASE WHEN source_candidates.status IN ('pending', 'needs_setup') THEN EXCLUDED.name ELSE source_candidates.name END,
+                 examples = (SELECT COALESCE(jsonb_agg(value ORDER BY first_ord), '[]'::jsonb)
+                             FROM (SELECT value, min(ord) AS first_ord FROM (
+                               SELECT value, ord FROM jsonb_array_elements_text(source_candidates.examples)
+                                 WITH ORDINALITY AS old(value, ord)
+                               UNION ALL
+                               SELECT value, 100 + ord FROM jsonb_array_elements_text(EXCLUDED.examples)
+                                 WITH ORDINALITY AS new(value, ord)
+                             ) combined GROUP BY value ORDER BY first_ord LIMIT 10) merged),
+                 updated_at = now()
+               RETURNING (xmax = 0) AS inserted""",
+            (domain, collection_url, name.strip(), kind, category, trust, scope,
+             json.dumps(examples, ensure_ascii=False)),
+        ).fetchone()
+        created += int(row[0])
+    return created
+
+
+def list_source_candidates(conn, status: str = "pending", limit: int = 200) -> list[dict[str, Any]]:
+    if status not in ("pending", "needs_setup", "approved", "rejected", "all"):
+        raise ValueError("invalid candidate status")
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("invalid candidate limit")
+    condition = "" if status == "all" else "WHERE status = %s"
+    params = (limit,) if status == "all" else (status, limit)
+    rows = conn.execute(
+        f"""SELECT id, publisher_domain, collection_url, name, kind, category, trust, scope,
+                   status, probe_status, probe_error, examples, discovered_at, updated_at
+            FROM source_candidates {condition} ORDER BY updated_at DESC, id DESC LIMIT %s""",
+        params,
+    ).fetchall()
+    keys = ("id", "publisher_domain", "collection_url", "name", "kind", "category", "trust", "scope",
+            "status", "probe_status", "probe_error", "example_urls", "discovered_at", "updated_at")
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def pause_exa_until(conn, until: datetime, reason: str) -> None:
+    safe_reason = reason if reason in {"limit_reached", "payment_required"} else "temporarily_unavailable"
+    conn.execute(
+        """INSERT INTO source_provider_state (provider, pause_until, pause_reason)
+           VALUES ('exa', %s, %s)
+           ON CONFLICT (provider) DO UPDATE SET pause_until = EXCLUDED.pause_until,
+             pause_reason = EXCLUDED.pause_reason, updated_at = now()""",
+        (until, safe_reason),
+    )
+
+
+def exa_pause_until(conn) -> datetime | None:
+    row = conn.execute(
+        "SELECT pause_until FROM source_provider_state WHERE provider = 'exa' AND pause_until > now()"
+    ).fetchone()
+    return row[0] if row else None
+
+
+def review_source_candidate(conn, candidate_id: int, action: str, fields: dict[str, Any],
+                            probe: dict[str, Any] | None) -> dict[str, Any]:
+    if type(candidate_id) is not int or candidate_id < 1 or action not in ("approve", "reject"):
+        raise ValueError("invalid candidate action")
+    if not isinstance(fields, dict) or set(fields) - {"name", "collection_url", "kind", "category", "trust", "scope"}:
+        raise ValueError("invalid candidate fields")
+    with conn.transaction():
+        row = conn.execute(
+            """SELECT publisher_domain, collection_url, name, kind, category, trust, scope, status
+               FROM source_candidates WHERE id = %s FOR UPDATE""", (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("candidate not found")
+        domain, old_url, old_name, old_kind, old_category, old_trust, old_scope, status = row
+        if status in ("approved", "rejected"):
+            raise ValueError("candidate already reviewed")
+        name = fields.get("name", old_name)
+        kind = fields.get("kind", old_kind)
+        category = fields.get("category", old_category)
+        trust = fields.get("trust", old_trust)
+        scope = fields.get("scope", old_scope)
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 200:
+            raise ValueError("invalid candidate name")
+        if kind not in ("rss", "html", "telegram"):
+            raise ValueError("invalid candidate kind")
+        if category not in ("ozon", "wildberries", "yandex", "chestny_znak", "industry"):
+            raise ValueError("invalid candidate category")
+        if trust not in ("official", "regulator", "industry"):
+            raise ValueError("invalid candidate trust")
+        if not isinstance(scope, str) or not scope.strip() or len(scope.strip()) > 300:
+            raise ValueError("invalid candidate scope")
+        collection_url = _candidate_collection_url(fields.get("collection_url", old_url), domain)
+        if action == "reject":
+            conn.execute(
+                """UPDATE source_candidates SET name=%s, collection_url=%s, kind=%s, category=%s,
+                     trust=%s, scope=%s, status='rejected', updated_at=now() WHERE id=%s""",
+                (name.strip(), collection_url, kind, category, trust, scope.strip(), candidate_id),
+            )
+            return {"status": "rejected", "source_code": None}
+        safe_probe_error = (probe.get("error") if isinstance(probe, dict) else "probe_failed")
+        if safe_probe_error not in {"unsafe_url", "probe_failed", "no_supported_feed", "unsupported_type",
+                                    "unsupported_telegram_url", "invalid_telegram_preview", "invalid_url",
+                                    "source_redirect", "article_url_not_source", None}:
+            safe_probe_error = "probe_failed"
+        probe_ok = (isinstance(probe, dict) and probe.get("ok") is True
+                    and probe.get("kind") == kind and probe.get("collection_url") == collection_url)
+        if not probe_ok:
+            conn.execute(
+                """UPDATE source_candidates SET name=%s, collection_url=%s, kind=%s, category=%s,
+                     trust=%s, scope=%s, status='needs_setup', probe_status='failed', probe_error=%s,
+                     updated_at=now() WHERE id=%s""",
+                (name.strip(), collection_url, kind, category, trust, scope.strip(), safe_probe_error, candidate_id),
+            )
+            return {"status": "needs_setup", "source_code": None}
+        code_hash = hashlib.sha256(f"{domain}|{collection_url}".encode("utf-8")).hexdigest()[:24]
+        source_code = "discovered_" + code_hash
+        conn.execute(
+            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, true, 'owner')
+               ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind,
+                 url=EXCLUDED.url, trust=EXCLUDED.trust, scope=EXCLUDED.scope,
+                 category=EXCLUDED.category, active=true
+               WHERE sources.managed_by='owner'""",
+            (source_code, name.strip(), kind, collection_url, trust, scope.strip(), category),
+        )
+        conn.execute(
+            """UPDATE source_candidates SET name=%s, collection_url=%s, kind=%s, category=%s,
+                 trust=%s, scope=%s, status='approved', probe_status='passed', probe_error=NULL,
+                 updated_at=now() WHERE id=%s""",
+            (name.strip(), collection_url, kind, category, trust, scope.strip(), candidate_id),
+        )
+        return {"status": "approved", "source_code": source_code}
 
 
 def _decode_feed_cursor(cursor: str) -> tuple[datetime, int, uuid.UUID]:

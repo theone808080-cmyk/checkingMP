@@ -16,6 +16,7 @@ from web.main import main as web
 from worker.main import main as process, probe, translate
 from watchdog.service import Settings as WatchdogSettings, container_healthcheck, run as run_watchdog
 from judge.main import import_labels, prepare_review as prepare_judge_sample, report as relevance_report
+from source_discovery.main import discover_sources as run_source_discovery
 
 WORK = Path(__file__).with_name("work")
 
@@ -28,6 +29,11 @@ def json_default(value):
 
 def watchdog() -> None:
     run_watchdog(WatchdogSettings.from_env())
+
+
+def discover_sources() -> None:
+    created, errors = run_source_discovery()
+    print(f"Новых кандидатов: {created}; каналов с ошибкой: {errors}")
 
 
 def check_container_health() -> None:
@@ -223,12 +229,13 @@ COMMANDS = {
     "telegram-set-menu": telegram.set_menu,
     "watchdog": watchdog,
     "container-healthcheck": check_container_health,
+    "discover-sources": discover_sources,
 }
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | prepare-judge-review [limit] | import-judge-labels <файл> | judge-report | web | health | watchdog | container-healthcheck")
+        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | prepare-judge-review [limit] | import-judge-labels <файл> | judge-report | discover-sources | web | health | watchdog | container-healthcheck")
     command = sys.argv[1]
     if command == "import-review":
         if len(sys.argv) != 3:

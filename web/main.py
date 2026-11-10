@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import db
+from source_discovery.probe import probe_source
 from web import telegram_auth
 
 
@@ -80,6 +81,60 @@ body{{font-family:system-ui,sans-serif;max-width:1180px;margin:auto;padding:24px
 <h2>Статус источников</h2><table><tr><th>Источник</th><th>Доверие</th><th>Последняя проверка</th><th>Ошибка</th></tr>{''.join(source_rows)}</table></body></html>"""
 
 
+def render_source_review(conn) -> str:
+    candidates = db.list_source_candidates(conn, status="all", limit=500)
+    last_run = conn.execute(
+        """SELECT status, started_at, finished_at, items, note FROM runs
+           WHERE service='source_discovery' ORDER BY id DESC LIMIT 1"""
+    ).fetchone()
+    pause = db.exa_pause_until(conn)
+    cards = []
+    for item in candidates:
+        if item["status"] not in ("pending", "needs_setup"):
+            continue
+        examples = item.get("example_urls") or []
+        links = " ".join(
+            f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noreferrer">пример {index}</a>'
+            for index, url in enumerate(examples, 1)
+        ) or "Примеров пока нет"
+        options = lambda values, selected: "".join(
+            f'<option value="{html.escape(value, quote=True)}" {"selected" if value == selected else ""}>{html.escape(value)}</option>'
+            for value in values
+        )
+        cards.append(f"""<article class="candidate" data-id="{int(item['id'])}">
+<h2>{html.escape(item['name'])} <small>{html.escape(item['publisher_domain'])}</small></h2>
+<p>Проверка: {html.escape(item['probe_status'])} {html.escape(item.get('probe_error') or '')}</p><p>{links}</p>
+<form><label>Название<input name="name" maxlength="200" required value="{html.escape(item['name'], quote=True)}"></label>
+<label>Адрес сбора<input name="collection_url" maxlength="2048" required value="{html.escape(item['collection_url'], quote=True)}"></label>
+<label>Тип<select name="kind">{options(('rss','html','telegram'), item['kind'])}</select></label>
+<label>Площадка<select name="category">{options(('ozon','wildberries','yandex','chestny_znak','industry'), item['category'])}</select></label>
+<label>Доверие<select name="trust">{options(('official','regulator','industry'), item['trust'])}</select></label>
+<label>Область<input name="scope" maxlength="300" required value="{html.escape(item['scope'], quote=True)}"></label>
+<button name="action" value="approve">Проверить и одобрить</button><button name="action" value="reject">Отклонить</button>
+<output aria-live="polite"></output></form></article>""")
+    if not cards:
+        cards.append("<p>Новых кандидатов нет.</p>")
+    if last_run:
+        provider_status = f"Последний поиск: {html.escape(last_run[0])}; найдено кандидатов: {int(last_run[3] or 0)}"
+        if last_run[2]:
+            provider_status += f"; завершён {html.escape(last_run[2].isoformat())}"
+        try:
+            details = json.loads(last_run[4] or "{}")
+            providers = details.get("providers", {})
+            labels = {"ok": "работает", "not_configured": "не настроен", "paused": "пауза до следующего месяца UTC"}
+            provider_status += "<br>Google News RSS: " + html.escape(labels.get(providers.get("google_news"), providers.get("google_news", "неизвестно")))
+            provider_status += "<br>Exa: " + html.escape(labels.get(providers.get("exa"), providers.get("exa", "неизвестно")))
+        except (AttributeError, TypeError, ValueError):
+            provider_status += "<br>Статус провайдеров недоступен."
+    else:
+        provider_status = "Поиск ещё не запускался."
+    exa_status = f"Exa приостановлен до {html.escape(pause.isoformat())}." if pause else "Exa доступен только при заданном ключе и свободном лимите."
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Проверка источников</title><style>body{{font:16px system-ui;max-width:960px;margin:auto;padding:20px}}.candidate{{border:1px solid #bbb;border-radius:12px;padding:16px;margin:16px 0}}form{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}label{{display:grid;gap:4px}}input,select,button{{font:inherit;padding:8px}}output{{grid-column:1/-1}}</style></head><body>
+<h1>Кандидаты в источники</h1><p>{provider_status}</p><p>{exa_status}</p>{''.join(cards)}
+<script>for(const form of document.querySelectorAll('.candidate form')){{form.addEventListener('submit',async event=>{{event.preventDefault();const button=event.submitter;const values=Object.fromEntries(new FormData(form).entries());const action=button.value;delete values.action;const output=form.querySelector('output');output.textContent='Сохраняем…';try{{const response=await fetch('/api/source-candidates/'+form.closest('.candidate').dataset.id,{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{action,fields:values}})}});const result=await response.json();output.textContent=response.ok?'Статус: '+result.status:'Не удалось выполнить действие: '+(result.error||result.status||response.status);if(response.ok&&result.status!=='needs_setup')form.closest('.candidate').remove();}}catch(_){{output.textContent='Не удалось связаться с сервером.';}}}});}}</script></body></html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def __getattr__(self, name):
         # BaseHTTPRequestHandler otherwise returns an unauthenticated 501 for
@@ -140,6 +195,23 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/miniapp":
             body = Path(__file__).with_name("miniapp.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/sources/review":
+            if not self.authorized():
+                self.reject_auth()
+                return
+            try:
+                with db.connect() as conn:
+                    body = render_source_review(conn).encode("utf-8")
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -227,6 +299,58 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.authorized():
             self.reject_auth()
+            return
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/source-candidates/"):
+            import re
+            match = re.fullmatch(r"/api/source-candidates/([1-9][0-9]{0,17})", parsed.path)
+            if not match or parsed.query or parsed.fragment:
+                self.json_response(404, {"error": "not found"})
+                return
+            origin = urlparse(self.headers.get("Origin", ""))
+            expected_scheme = self.headers.get("X-Forwarded-Proto", "http").split(",", 1)[0].strip().lower()
+            host = self.headers.get("Host", "")
+            if (origin.scheme not in ("http", "https") or origin.scheme != expected_scheme
+                    or origin.netloc.casefold() != host.casefold() or origin.path not in ("", "/")
+                    or origin.params or origin.query or origin.fragment or origin.username or origin.password):
+                self.json_response(403, {"error": "same-origin request required"})
+                return
+            try:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 8192
+                        or self.headers.get("Transfer-Encoding")
+                        or self.headers.get_content_type() != "application/json"):
+                    raise ValueError("invalid request body")
+                payload = json.loads(self.rfile.read(int(lengths[0])).decode("utf-8"))
+                if (not isinstance(payload, dict) or set(payload) != {"action", "fields"}
+                        or payload["action"] not in ("approve", "reject")
+                        or not isinstance(payload["fields"], dict)
+                        or set(payload["fields"]) - {"name", "collection_url", "kind", "category", "trust", "scope"}):
+                    raise ValueError("invalid request schema")
+                candidate_id = int(match.group(1))
+                with db.connect() as conn:
+                    candidates = db.list_source_candidates(conn, status="all", limit=500)
+                    candidate = next((item for item in candidates if item["id"] == candidate_id), None)
+                if candidate is None:
+                    self.json_response(404, {"error": "candidate not found"})
+                    return
+                probe = None
+                fields = dict(payload["fields"])
+                if payload["action"] == "approve":
+                    kind = fields.get("kind", candidate["kind"])
+                    url = fields.get("collection_url", candidate["collection_url"])
+                    probe = probe_source(url, kind=kind)
+                    if probe.ok:
+                        fields["kind"] = probe.kind
+                        fields["collection_url"] = probe.collection_url
+                with db.connect() as conn:
+                    result = db.review_source_candidate(conn, candidate_id, payload["action"], fields,
+                                                        probe.__dict__ if probe is not None else None)
+                self.json_response(200 if result["status"] != "needs_setup" else 422, result)
+            except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+                self.json_response(400, {"error": "invalid request"})
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
             return
         self.json_response(404, {"error": "not found"})
 

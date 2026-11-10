@@ -62,10 +62,12 @@ class WebTests(unittest.TestCase):
         self.import_mock = self.importer.start()
         self.addCleanup(self.importer.stop)
 
-    def request(self, method, path, auth=None, body=None):
+    def request(self, method, path, auth=None, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
-        headers = {"Authorization": auth} if auth else {}
-        conn.request(method, path, body=body, headers=headers)
+        request_headers = dict(headers or {})
+        if auth:
+            request_headers["Authorization"] = auth
+        conn.request(method, path, body=body, headers=request_headers)
         response = conn.getresponse()
         result = response.status, response.read()
         conn.close()
@@ -138,6 +140,49 @@ class WebTests(unittest.TestCase):
         ):
             with self.subTest(query=query):
                 self.assertEqual(self.request("GET", "/api/findings?" + query, basic)[0], 400)
+
+    def test_source_review_page_requires_basic_auth(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        self.assertEqual(self.request("GET", "/sources/review")[0], 401)
+        self.assertEqual(self.request("GET", "/api/source-candidates")[0], 401)
+        with patch.object(web, "render_source_review", return_value="review page", create=True):
+            status, body = self.request("GET", "/sources/review", basic)
+        self.assertEqual((status, body), (200, b"review page"))
+
+    def test_source_approval_requires_same_origin_and_server_probe(self):
+        from source_discovery.probe import ProbeResult
+
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        body = json.dumps({"action": "approve", "fields": {
+            "name": "Seller", "collection_url": "https://seller.example/",
+            "kind": "rss", "category": "ozon", "trust": "industry", "scope": "ozon sellers",
+        }})
+        headers = {"Content-Type": "application/json", "Origin": "https://attacker.example"}
+        with patch.object(web, "probe_source", return_value=ProbeResult(True, "rss", "https://seller.example/feed.xml"), create=True) as probe:
+            self.assertEqual(self.request("POST", "/api/source-candidates/1", basic, body, headers)[0], 403)
+            probe.assert_not_called()
+
+        headers["Origin"] = origin
+        candidate = {"id": 1, "kind": "rss", "collection_url": "https://seller.example/feed.xml"}
+        with patch.object(web.db, "list_source_candidates", return_value=[candidate], create=True), \
+             patch.object(web, "probe_source", return_value=ProbeResult(True, "rss", "https://seller.example/feed.xml"), create=True) as probe, \
+             patch.object(web.db, "review_source_candidate", return_value={"status": "approved", "source_code": "discovered_test"}, create=True) as review:
+            status, response = self.request("POST", "/api/source-candidates/1", basic, body, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(response)["status"], "approved")
+        probe.assert_called_once_with("https://seller.example/", kind="rss")
+        self.assertTrue(review.call_args.args[4]["ok"])
+        self.assertEqual(review.call_args.args[3]["collection_url"], "https://seller.example/feed.xml")
+
+    def test_client_cannot_supply_probe_result(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        body = json.dumps({"action": "approve", "fields": {}, "probe": {"ok": True}})
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        with patch.object(web.db, "review_source_candidate", create=True) as review:
+            self.assertEqual(self.request("POST", "/api/source-candidates/1", basic, body, headers)[0], 400)
+            review.assert_not_called()
 
 
 

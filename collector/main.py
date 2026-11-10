@@ -13,15 +13,17 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 import db
+from collector.safe_fetch import fetch_public
 
 SERVICE = "collector"
 MAX_PER_SOURCE = 30
 ATOM = "{http://www.w3.org/2005/Atom}"
 
 
-def fetch(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "marketplace-compliance-radar/0.1"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+def fetch(url: str, *, safe: bool = False) -> bytes:
+    if safe:
+        return fetch_public(url, timeout=30, max_bytes=2_000_000)
+    with urllib.request.urlopen(url, timeout=30) as response:
         return response.read()
 
 
@@ -37,8 +39,8 @@ def parse_date(value: str | None):
             return None
 
 
-def read_rss(url: str):
-    root = ET.fromstring(fetch(url))
+def read_rss(url: str, *, safe: bool = False):
+    root = ET.fromstring(fetch(url, safe=safe))
     for item in root.iter("item"):
         link = (item.findtext("link") or "").strip()
         title = (item.findtext("title") or "").strip()
@@ -76,8 +78,8 @@ class LinkParser(HTMLParser):
             self._href = None
 
 
-def read_html(url: str):
-    page = fetch(url).decode("utf-8", errors="replace")
+def read_html(url: str, *, safe: bool = False):
+    page = fetch(url, safe=safe).decode("utf-8", errors="replace")
     title_match = re.search(r"<title[^>]*>(.*?)</title>", page, re.IGNORECASE | re.DOTALL)
     title = html.unescape(re.sub(r"<[^>]+>", " ", title_match.group(1))).strip() if title_match else url
     without_noncontent = re.sub(r"<(script|style|noscript)[^>]*>.*?</\\1>", " ", page, flags=re.IGNORECASE | re.DOTALL)
@@ -90,8 +92,8 @@ def read_html(url: str):
     yield {"url": url, "title": title[:500], "text": text, "published_at": None}
 
 
-def read_telegram(url: str):
-    page = fetch(url).decode("utf-8", errors="replace")
+def read_telegram(url: str, *, safe: bool = False):
+    page = fetch(url, safe=safe).decode("utf-8", errors="replace")
     pattern = re.compile(
         r'data-post="([^"]+)"[\s\S]*?<div class="tgme_widget_message_text[^>]*>([\s\S]*?)</div></div>',
         re.DOTALL,
@@ -120,10 +122,13 @@ def main() -> dict:
         failed_sources = []
         failure_signatures = {}
         try:
-            sources = conn.execute("SELECT id, name, kind, url, code FROM sources WHERE active ORDER BY id").fetchall()
-            for source_id, name, kind, url, source_code in sources:
+            sources = conn.execute("SELECT id, name, kind, url, code, managed_by FROM sources WHERE active ORDER BY id").fetchall()
+            for source_id, name, kind, url, source_code, managed_by in sources:
                 try:
-                    items = list(READERS[kind](url))[:MAX_PER_SOURCE]
+                    if managed_by == "owner":
+                        items = list(READERS[kind](url, safe=True))[:MAX_PER_SOURCE]
+                    else:
+                        items = list(READERS[kind](url))[:MAX_PER_SOURCE]
                     new = sum(db.add_material(conn, source_id, run_id, item) for item in items)
                     total += new
                     conn.execute("UPDATE sources SET last_checked_at = now(), last_error = NULL WHERE id = %s", (source_id,))

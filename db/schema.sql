@@ -12,6 +12,32 @@ CREATE TABLE IF NOT EXISTS sources (
 );
 
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'industry';
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS managed_by TEXT NOT NULL DEFAULT 'config';
+
+CREATE TABLE IF NOT EXISTS source_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    publisher_domain TEXT NOT NULL,
+    collection_url TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('rss', 'html', 'telegram')),
+    category TEXT NOT NULL,
+    trust TEXT NOT NULL CHECK (trust IN ('official', 'regulator', 'industry')),
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'needs_setup', 'approved', 'rejected')),
+    probe_status TEXT NOT NULL DEFAULT 'pending',
+    probe_error TEXT,
+    examples JSONB NOT NULL DEFAULT '[]'::jsonb,
+    discovered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (publisher_domain, collection_url)
+);
+
+CREATE TABLE IF NOT EXISTS source_provider_state (
+    provider TEXT PRIMARY KEY,
+    pause_until TIMESTAMPTZ,
+    pause_reason TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS runs (
     id SERIAL PRIMARY KEY,
