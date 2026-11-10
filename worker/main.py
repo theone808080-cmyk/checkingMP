@@ -142,8 +142,18 @@ def infer(batch):
         if not isinstance(content, str):
             raise ValueError("Completion content must be text")
         payload = validate(strict_loads(content), batch)
-    except (OSError, ValueError, UnicodeError, KeyError, IndexError, TypeError):
-        raise RuntimeError("OpenRouter processing failed; queue unchanged") from None
+    except urllib.error.HTTPError as error:
+        failure = RuntimeError("OpenRouter request rejected; queue unchanged")
+        failure.failure_signature = f"http_{error.code}"
+        raise failure from None
+    except OSError:
+        failure = RuntimeError("OpenRouter transport failed; queue unchanged")
+        failure.failure_signature = "transport"
+        raise failure from None
+    except (ValueError, UnicodeError, KeyError, IndexError, TypeError):
+        failure = RuntimeError("OpenRouter response invalid; queue unchanged")
+        failure.failure_signature = "invalid_response"
+        raise failure from None
     return payload
 
 
@@ -195,3 +205,4 @@ def main():
         db.init_schema(conn)
         created, linked, skipped = process(conn)
     print(f"Events created: {created}; materials linked: {linked}; skipped: {skipped}")
+    return {"items": linked + skipped, "events": created}

@@ -195,10 +195,13 @@ class WorkerTests(unittest.TestCase):
 
     def test_cycle_collects_before_processing(self):
         calls = []
-        with patch.object(cli, "collect", side_effect=lambda: calls.append("collect")), patch.object(cli, "process", side_effect=lambda: calls.append("process")):
+        with patch.object(cli.db, "connect"), patch.object(cli.db, "init_schema"), \
+             patch.object(cli.db, "start_cycle", return_value=1), \
+             patch.object(cli, "_record_cycle_stage"), patch.object(cli, "_finish_cycle"), \
+             patch.object(cli, "collect", side_effect=lambda: calls.append("collect")), \
+             patch.object(cli, "process", side_effect=lambda: calls.append("process")):
             cli.cycle()
         self.assertEqual(calls, ["collect", "process"])
-
     def test_manual_review_import_preserves_confirmed(self):
         signal = {**SIGNAL, "verification": "confirmed"}
         payload = {"signals": [signal], "skipped_material_ids": []}
@@ -244,6 +247,18 @@ class WorkerTests(unittest.TestCase):
                 worker.infer(BATCH)
             self.assertNotIn(key, "".join(traceback.format_exception(caught.exception)))
             self.assertNotIn(key, str(worker.probe()))
+
+    def test_safe_processing_failure_categories_differ_by_failure_type(self):
+        key = "synthetic-secret"
+        errors = []
+        for error in (OSError("offline"), ValueError("invalid response")):
+            with patch.dict(worker.os.environ, {"OPENROUTER_API_KEY": key}), \
+                 patch.object(worker, "open_url", side_effect=error):
+                with self.assertRaises(RuntimeError) as caught:
+                    worker.infer(BATCH)
+                errors.append(caught.exception)
+        self.assertNotEqual(errors[0].failure_signature, errors[1].failure_signature)
+        self.assertNotIn(key, str(errors[0]))
 
     def test_probe(self):
         with patch.object(worker, "open_url", return_value=Response(b'{"data":[{"id":"local"}]}')):

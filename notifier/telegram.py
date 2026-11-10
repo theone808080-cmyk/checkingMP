@@ -105,16 +105,30 @@ def initialize(conn):
         conn.execute('SELECT pg_advisory_unlock(%s)', (LOCK_ID,))
 
 
-def notify_new_materials(conn, config):
+def notify_new_materials_status(conn, config, *, cycle_id=None):
     acquired = conn.execute('SELECT pg_try_advisory_lock(%s)', (LOCK_ID,)).fetchone()[0]
     if not acquired:
-        return False
+        return ("busy", None)
     try:
         batch = claim_batch(conn)
         if not batch:
-            return False
+            return ("empty", None)
         message_id = send_message(config, batch[1])
-        mark_sent(conn, batch[0], message_id)
-        return True
+        delivered_ids = [row[0] for row in conn.execute(
+            "SELECT material_id FROM notification_materials WHERE batch_id = %s ORDER BY material_id", (batch[0],)
+        ).fetchall()]
+        with conn.transaction():
+            mark_sent(conn, batch[0], message_id)
+            if cycle_id is not None:
+                conn.execute(
+                    """UPDATE cycles SET notification_status = 'sent', notification_checked_at = now(),
+                              notification_delivered_material_ids = %s::jsonb WHERE id = %s""",
+                    (json.dumps(delivered_ids), cycle_id),
+                )
+        return ("sent", delivered_ids)
     finally:
         conn.execute('SELECT pg_advisory_unlock(%s)', (LOCK_ID,))
+
+
+def notify_new_materials(conn, config):
+    return notify_new_materials_status(conn, config)[0] == "sent"

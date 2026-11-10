@@ -343,6 +343,220 @@ def finish_run(conn, run_id: int, status: str, items: int, note: str) -> None:
     )
 
 
+CYCLE_STAGES = {
+    "collection": ("collection_status", "collected_items"),
+    "notifications": ("notification_status", None),
+    "processing": ("processing_status", "processed_items"),
+}
+
+
+def start_cycle(conn) -> int:
+    return conn.execute("INSERT INTO cycles DEFAULT VALUES RETURNING id").fetchone()[0]
+
+
+def update_cycle_stage(conn, cycle_id: int, stage: str, status: str, *, items: int = 0,
+                       source_failures: list[str] | None = None,
+                       source_failure_signatures: dict[str, str] | None = None,
+                       notification_delivered_material_ids: list[int] | None = None,
+                       error: str | None = None) -> None:
+    if stage not in CYCLE_STAGES:
+        raise ValueError("Unknown cycle stage")
+    allowed = {"collection": {"pending", "success", "failed"},
+               "notifications": {"pending", "sent", "skipped", "failed"},
+               "processing": {"pending", "success", "failed"}}
+    if status not in allowed[stage]:
+        raise ValueError("Invalid cycle stage status")
+    status_column, items_column = CYCLE_STAGES[stage]
+    assignments = [f"{status_column} = %s"]
+    values: list[Any] = [status]
+    if items_column:
+        assignments.append(f"{items_column} = %s")
+        values.append(max(0, int(items)))
+    if stage == "collection" and source_failures is not None:
+        assignments.append("source_failures = %s")
+        values.append(sorted({str(code)[:120] for code in source_failures}))
+    if stage == "collection" and source_failure_signatures is not None:
+        assignments.append("source_failure_signatures = %s::jsonb")
+        values.append(json.dumps({str(code)[:120]: str(signature)[:64]
+                                  for code, signature in source_failure_signatures.items()}))
+    if error is not None:
+        assignments.extend(("error_stage = %s", "error_message = %s"))
+        values.extend((stage, error[:300]))
+    if stage == "notifications":
+        assignments.append("notification_checked_at = now()")
+        if notification_delivered_material_ids is not None:
+            assignments.append("notification_delivered_material_ids = %s::jsonb")
+            values.append(json.dumps(sorted({max(0, int(item)) for item in notification_delivered_material_ids})))
+    values.append(cycle_id)
+    conn.execute(f"UPDATE cycles SET {', '.join(assignments)} WHERE id = %s", values)
+
+
+def finish_cycle(conn, cycle_id: int, status: str, *, error_stage: str | None = None,
+                 error: str | None = None) -> None:
+    if status not in {"success", "failed"}:
+        raise ValueError("Invalid terminal cycle status")
+    conn.execute(
+        """UPDATE cycles SET status = %s, finished_at = now(),
+           error_stage = COALESCE(%s, error_stage),
+           error_message = COALESCE(%s, error_message) WHERE id = %s""",
+        (status, error_stage, error[:300] if error else None, cycle_id),
+    )
+
+
+def recent_cycles(conn, limit: int = 3) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT id, status, collection_status, notification_status, processing_status,
+                  collected_items, processed_items, source_failures, source_failure_signatures,
+                  notification_checked_at,
+                  notification_attempted, notification_target_material_ids, notification_delivered_material_ids,
+                  error_stage, error_message,
+                  started_at, finished_at
+           FROM cycles WHERE finished_at IS NOT NULL OR status = 'started'
+           ORDER BY COALESCE(finished_at, started_at) DESC, id DESC LIMIT %s""",
+        (max(1, min(int(limit), 20)),),
+    ).fetchall()
+    keys = ("id", "status", "collection_status", "notification_status", "processing_status",
+            "collected_items", "processed_items", "source_failures", "source_failure_signatures",
+            "notification_checked_at", "notification_attempted", "notification_target_material_ids",
+            "notification_delivered_material_ids", "error_stage",
+            "error_message", "started_at", "finished_at")
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def latest_successful_cycle(conn) -> datetime | None:
+    row = conn.execute("SELECT finished_at FROM cycles WHERE status = 'success' ORDER BY finished_at DESC LIMIT 1").fetchone()
+    return row[0] if row else None
+
+
+def set_notification_target(conn, cycle_id: int) -> list[int]:
+    row = conn.execute(
+        """WITH target AS MATERIALIZED (
+             SELECT COALESCE(jsonb_agg(m.id ORDER BY m.id), '[]'::jsonb) AS material_ids
+             FROM materials m
+             LEFT JOIN notification_materials nm ON nm.material_id = m.id
+             LEFT JOIN notification_batches nb ON nb.id = nm.batch_id
+             WHERE nm.material_id IS NULL OR (nm.batch_id IS NOT NULL AND nb.sent_at IS NULL)
+           )
+           UPDATE cycles c SET notification_target_material_ids = target.material_ids,
+             notification_attempted = true
+           FROM target WHERE c.id = %s RETURNING target.material_ids""",
+        (cycle_id,),
+    ).fetchone()
+    return row[0] if row else []
+
+
+def stale_started_cycles(conn, cutoff: datetime) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT id, status, collection_status, notification_status, processing_status,
+                  collected_items, processed_items, source_failures, source_failure_signatures,
+                  notification_checked_at,
+                  notification_attempted, notification_target_material_ids, notification_delivered_material_ids,
+                  error_stage, error_message, started_at, finished_at
+           FROM cycles WHERE status = 'started' AND started_at < %s ORDER BY started_at""",
+        (cutoff,),
+    ).fetchall()
+    keys = ("id", "status", "collection_status", "notification_status", "processing_status",
+            "collected_items", "processed_items", "source_failures", "source_failure_signatures",
+            "notification_checked_at", "notification_attempted", "notification_target_material_ids",
+            "notification_delivered_material_ids",
+            "error_stage", "error_message", "started_at", "finished_at")
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def has_unresolved_notification_failure(conn) -> bool:
+    return bool(conn.execute(
+        """SELECT EXISTS (
+             SELECT 1 FROM cycles failed
+             WHERE failed.notification_status = 'failed' AND failed.notification_checked_at IS NOT NULL
+               AND failed.notification_attempted AND failed.notification_target_material_ids IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM jsonb_array_elements_text(failed.notification_target_material_ids) target(material_id)
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM cycles delivered,
+                     jsonb_array_elements_text(delivered.notification_delivered_material_ids) sent(material_id)
+                   WHERE delivered.notification_status = 'sent'
+                     AND sent.material_id = target.material_id
+                 )
+               )
+           )"""
+    ).fetchone()[0])
+
+def watchdog_runtime_state(conn, now=None) -> dict[str, Any]:
+    conn.execute(
+        """INSERT INTO watchdog_incidents (incident_key, active, details, opened_at)
+           VALUES ('__runtime__', false, 'runtime', COALESCE(%s, now()))
+           ON CONFLICT (incident_key) DO NOTHING""", (now,)
+    )
+    row = conn.execute(
+        "SELECT opened_at, consecutive_failures, restart_attempted FROM watchdog_incidents WHERE incident_key = '__runtime__'"
+    ).fetchone()
+    return {"started_at": row[0], "failed_checks": row[1], "restart_attempted": row[2]}
+
+
+def watchdog_started_at(conn, now=None):
+    return watchdog_runtime_state(conn, now)["started_at"]
+
+
+def update_watchdog_runtime(conn, *, failed_checks: int, restart_attempted: bool) -> None:
+    update_watchdog_incident(conn, "__runtime__", consecutive_failures=failed_checks,
+                             restart_attempted=restart_attempted)
+
+
+def watchdog_incidents(conn) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT incident_key, active, consecutive_failures, restart_attempted, details,
+                  opened_at, resolved_at, alert_sent_at, recovery_sent_at
+           FROM watchdog_incidents"""
+    ).fetchall()
+    keys = ("incident_key", "active", "consecutive_failures", "restart_attempted", "details",
+            "opened_at", "resolved_at", "alert_sent_at", "recovery_sent_at")
+    return {row[0]: dict(zip(keys, row)) for row in rows if row[0] != "__runtime__"}
+
+
+def open_watchdog_incident(conn, incident_key: str, details: str, *, now=None) -> None:
+    conn.execute(
+        """INSERT INTO watchdog_incidents
+           (incident_key, active, details, opened_at) VALUES (%s, true, %s, COALESCE(%s, now()))
+           ON CONFLICT (incident_key) DO UPDATE SET
+             active = true, details = EXCLUDED.details,
+             opened_at = CASE WHEN watchdog_incidents.active THEN watchdog_incidents.opened_at
+                              ELSE EXCLUDED.opened_at END,
+             resolved_at = NULL,
+             alert_sent_at = CASE WHEN watchdog_incidents.active THEN watchdog_incidents.alert_sent_at ELSE NULL END,
+             recovery_sent_at = CASE WHEN watchdog_incidents.active THEN watchdog_incidents.recovery_sent_at ELSE NULL END""",
+        (incident_key, details[:500], now),
+    )
+
+
+def update_watchdog_incident(conn, incident_key: str, *, details: str | None = None,
+                             consecutive_failures: int | None = None,
+                             restart_attempted: bool | None = None) -> None:
+    assignments = []
+    values: list[Any] = []
+    if details is not None:
+        assignments.append("details = %s")
+        values.append(details[:500])
+    if consecutive_failures is not None:
+        assignments.append("consecutive_failures = %s")
+        values.append(max(0, int(consecutive_failures)))
+    if restart_attempted is not None:
+        assignments.append("restart_attempted = %s")
+        values.append(bool(restart_attempted))
+    if assignments:
+        values.append(incident_key)
+        conn.execute(f"UPDATE watchdog_incidents SET {', '.join(assignments)} WHERE incident_key = %s", values)
+
+
+def mark_watchdog_notice_sent(conn, incident_key: str, *, recovered: bool = False, now=None) -> None:
+    column = "recovery_sent_at" if recovered else "alert_sent_at"
+    conn.execute(f"UPDATE watchdog_incidents SET {column} = COALESCE(%s, now()) WHERE incident_key = %s",
+                 (now, incident_key))
+
+
+def resolve_watchdog_incident(conn, incident_key: str, *, now=None) -> None:
+    conn.execute("UPDATE watchdog_incidents SET active = false, resolved_at = COALESCE(%s, now()) WHERE incident_key = %s",
+                 (now, incident_key))
+
 def add_material(conn, source_id: int, run_id: int, item: dict[str, Any]) -> bool:
     body = (item.get("text") or "").strip()
     fingerprint = hashlib.sha256(

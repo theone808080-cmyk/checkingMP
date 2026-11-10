@@ -23,6 +23,44 @@ CREATE TABLE IF NOT EXISTS runs (
     note TEXT
 );
 
+CREATE TABLE IF NOT EXISTS cycles (
+    id BIGSERIAL PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'started' CHECK (status IN ('started', 'success', 'failed')),
+    collection_status TEXT NOT NULL DEFAULT 'pending' CHECK (collection_status IN ('pending', 'success', 'failed')),
+    notification_status TEXT NOT NULL DEFAULT 'pending' CHECK (notification_status IN ('pending', 'sent', 'skipped', 'failed')),
+    notification_checked_at TIMESTAMPTZ,
+    notification_attempted BOOLEAN NOT NULL DEFAULT false,
+    notification_target_material_ids JSONB,
+    notification_delivered_material_ids JSONB,
+    processing_status TEXT NOT NULL DEFAULT 'pending' CHECK (processing_status IN ('pending', 'success', 'failed')),
+    collected_items INTEGER NOT NULL DEFAULT 0 CHECK (collected_items >= 0),
+    processed_items INTEGER NOT NULL DEFAULT 0 CHECK (processed_items >= 0),
+    source_failures TEXT[] NOT NULL DEFAULT '{}',
+    source_failure_signatures JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error_stage TEXT,
+    error_message TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ
+);
+
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS source_failure_signatures JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS notification_checked_at TIMESTAMPTZ;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS notification_attempted BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS notification_target_material_ids JSONB;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS notification_delivered_material_ids JSONB;
+
+CREATE TABLE IF NOT EXISTS watchdog_incidents (
+    incident_key TEXT PRIMARY KEY,
+    active BOOLEAN NOT NULL DEFAULT true,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+    restart_attempted BOOLEAN NOT NULL DEFAULT false,
+    details TEXT NOT NULL,
+    opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    alert_sent_at TIMESTAMPTZ,
+    recovery_sent_at TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS materials (
     id SERIAL PRIMARY KEY,
     source_id INTEGER NOT NULL REFERENCES sources(id),

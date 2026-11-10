@@ -12,4 +12,6 @@ COPY db ./db
 COPY notifier ./notifier
 COPY web ./web
 COPY worker ./worker
+COPY watchdog ./watchdog
+HEALTHCHECK --interval=2m --timeout=10s --start-period=10m --retries=2 CMD ["python", "main.py", "container-healthcheck"]
 CMD ["python", "main.py", "web"]

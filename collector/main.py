@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 import urllib.request
@@ -109,17 +110,18 @@ def read_telegram(url: str):
 READERS = {"rss": read_rss, "html": read_html, "telegram": read_telegram}
 
 
-def main() -> None:
+def main() -> dict:
     with db.connect() as conn:
         db.init_schema(conn)
         db.sync_sources(conn)
         run_id = db.start_run(conn, SERVICE)
         total = 0
         successful_sources = 0
-        failed_sources = 0
+        failed_sources = []
+        failure_signatures = {}
         try:
-            sources = conn.execute("SELECT id, name, kind, url FROM sources WHERE active ORDER BY id").fetchall()
-            for source_id, name, kind, url in sources:
+            sources = conn.execute("SELECT id, name, kind, url, code FROM sources WHERE active ORDER BY id").fetchall()
+            for source_id, name, kind, url, source_code in sources:
                 try:
                     items = list(READERS[kind](url))[:MAX_PER_SOURCE]
                     new = sum(db.add_material(conn, source_id, run_id, item) for item in items)
@@ -128,12 +130,20 @@ def main() -> None:
                     successful_sources += 1
                     print(f"[{SERVICE}] {name}: {len(items)} прочитано, {new} новых", flush=True)
                 except Exception as error:
-                    failed_sources += 1
+                    failed_sources.append(source_code)
+                    failure_signatures[source_code] = hashlib.sha256(
+                        f"{type(error).__name__}:{error}".encode("utf-8", errors="replace")
+                    ).hexdigest()[:16]
                     conn.execute("UPDATE sources SET last_checked_at = now(), last_error = %s WHERE id = %s", (str(error)[:500], source_id))
                     print(f"[{SERVICE}] {name}: недоступен: {error}", flush=True)
             if not successful_sources:
-                raise RuntimeError("No sources were successfully read")
-            db.finish_run(conn, run_id, "finished", total, f"New materials: {total}; sources read: {successful_sources}; source failures: {failed_sources}")
+                failure = RuntimeError("No sources were successfully read")
+                failure.source_failures = failed_sources
+                failure.source_failure_signatures = failure_signatures
+                raise failure
+            db.finish_run(conn, run_id, "finished", total, f"New materials: {total}; sources read: {successful_sources}; source failures: {len(failed_sources)}")
+            return {"items": total, "source_failures": failed_sources,
+                    "source_failure_signatures": failure_signatures}
         except Exception as error:
             db.finish_run(conn, run_id, "failed", total, str(error))
             raise
