@@ -12,6 +12,7 @@ import db
 from collector.main import main as collect
 from notifier import telegram
 from web.main import main as web
+from judge.main import import_labels, prepare_review as prepare_judge_sample, report as relevance_report
 from worker.main import main as process, probe
 
 WORK = Path(__file__).with_name("work")
@@ -31,6 +32,32 @@ def prepare_review() -> None:
     target = WORK / "pending-review.json"
     target.write_text(json.dumps({"materials": batch}, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
     print(f"Подготовлено {len(batch)} материалов: {target}")
+
+
+def prepare_judge_review(limit: int = 100) -> Path:
+    with db.connect() as conn:
+        db.init_schema(conn)
+        payload = prepare_judge_sample(conn, limit)
+    WORK.mkdir(exist_ok=True)
+    target = WORK / "judge-review.json"
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
+    print(f"Подготовлено для слепой разметки {len(payload['materials'])} материалов: {target}")
+    return target
+
+
+def import_judge_labels(path: str) -> None:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    with db.connect() as conn:
+        db.init_schema(conn)
+        count = import_labels(conn, payload)
+    print(f"Сохранено ручных меток: {count}")
+
+
+def show_judge_report() -> None:
+    with db.connect() as conn:
+        db.init_schema(conn)
+        result = relevance_report(conn)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def import_review(path: str) -> None:
@@ -84,17 +111,40 @@ def cycle() -> None:
     process()
 
 
-COMMANDS = {"cycle": cycle, "collect": collect, "process": process, "prepare-review": prepare_review, "web": web, "health": show_health, "telegram-set-menu": telegram.set_menu}
+COMMANDS = {
+    "cycle": cycle,
+    "collect": collect,
+    "process": process,
+    "prepare-review": prepare_review,
+    "prepare-judge-review": prepare_judge_review,
+    "import-judge-labels": import_judge_labels,
+    "judge-report": show_judge_report,
+    "web": web,
+    "health": show_health,
+    "telegram-set-menu": telegram.set_menu,
+}
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | web | health")
+        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | prepare-judge-review [limit] | import-judge-labels <файл> | judge-report | web | health")
     command = sys.argv[1]
     if command == "import-review":
         if len(sys.argv) != 3:
             sys.exit("Использование: python main.py import-review work\\reviewed-signals.json")
         import_review(sys.argv[2])
+    elif command == "import-judge-labels":
+        if len(sys.argv) != 3:
+            sys.exit("Использование: python main.py import-judge-labels work\\judge-review.json")
+        import_judge_labels(sys.argv[2])
+    elif command == "prepare-judge-review":
+        if len(sys.argv) > 3:
+            sys.exit("Использование: python main.py prepare-judge-review [limit]")
+        try:
+            limit = int(sys.argv[2]) if len(sys.argv) == 3 else 100
+        except ValueError:
+            sys.exit("limit должен быть целым числом от 1 до 1000")
+        prepare_judge_review(limit)
     elif command in COMMANDS:
         COMMANDS[command]()
     else:

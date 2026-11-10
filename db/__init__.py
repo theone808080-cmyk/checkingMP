@@ -15,6 +15,8 @@ from typing import Any, Iterable
 
 import psycopg
 
+from judge.constants import CLASSIFICATIONS
+
 SCHEMA = Path(__file__).with_name("schema.sql")
 SOURCE_CONFIG = Path(__file__).parents[1] / "config" / "sources.json"
 SCHEMA_LOCK = 21429
@@ -366,6 +368,135 @@ def pending_materials(conn, limit: int = 50) -> list[dict[str, Any]]:
         (limit,),
     ).fetchall()
     columns = ("material_id", "url", "title", "text", "published_at", "source_code", "source", "trust", "scope")
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def pending_relevance_materials(conn, rules_version: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT m.id, m.url, m.title, m.text, m.published_at,
+                  s.code, s.name, s.trust, s.scope
+           FROM materials m JOIN sources s ON s.id = m.source_id
+           WHERE m.status = 'new'
+             AND NOT EXISTS (
+                 SELECT 1 FROM relevance_assessments a
+                 WHERE a.material_id = m.id AND a.rules_version = %s
+             )
+           ORDER BY m.published_at DESC NULLS LAST, m.id DESC""",
+        (rules_version,),
+    ).fetchall()
+    columns = ("material_id", "url", "title", "text", "published_at", "source_code", "source", "trust", "scope")
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def save_relevance_assessments(conn, assessments: Iterable[dict[str, Any]]) -> int:
+    assessments = list(assessments)
+    seen = set()
+    for assessment in assessments:
+        material_id = assessment.get("material_id")
+        version = assessment.get("rules_version")
+        if type(material_id) is not int or material_id < 1 or not isinstance(version, str) or not version.strip():
+            raise ValueError("Invalid relevance assessment identity")
+        if (material_id, version) in seen:
+            raise ValueError("Duplicate relevance assessment in batch")
+        seen.add((material_id, version))
+        if assessment.get("classification") not in CLASSIFICATIONS:
+            raise ValueError("Invalid relevance classification")
+        if type(assessment.get("score")) is not int or not 0 <= assessment["score"] <= 100:
+            raise ValueError("Relevance score must be an integer from 0 to 100")
+        for field in ("rule_codes", "platforms"):
+            values = assessment.get(field)
+            if not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values):
+                raise ValueError(f"Invalid relevance assessment field: {field}")
+        if not isinstance(assessment.get("explanation"), str) or not assessment["explanation"].strip():
+            raise ValueError("Relevance assessment requires an explanation")
+
+    if not assessments:
+        return 0
+    inserted = 0
+    with conn.transaction():
+        for item in assessments:
+            row = conn.execute(
+                """INSERT INTO relevance_assessments
+                   (material_id, rules_version, classification, score, rule_codes, platforms, explanation)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (material_id, rules_version) DO NOTHING
+                   RETURNING id""",
+                (item["material_id"], item["rules_version"], item["classification"], item["score"],
+                 item["rule_codes"], item["platforms"], item["explanation"][:300]),
+            ).fetchone()
+            inserted += row is not None
+    return inserted
+
+
+def relevance_review_sample(conn, limit: int = 100) -> list[dict[str, Any]]:
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError("Review sample limit must be between 1 and 1000")
+    rows = conn.execute(
+        """WITH candidates AS (
+               SELECT m.id, m.title, m.text, s.code, s.name,
+                      row_number() OVER (PARTITION BY m.source_id ORDER BY m.collected_at DESC, m.id DESC) AS source_rank
+               FROM materials m JOIN sources s ON s.id = m.source_id
+               LEFT JOIN relevance_labels l ON l.material_id = m.id
+               WHERE l.material_id IS NULL
+           )
+           SELECT id, title, text, code, name
+           FROM candidates
+           ORDER BY source_rank, code, id
+           LIMIT %s""",
+        (limit,),
+    ).fetchall()
+    columns = ("material_id", "title", "text", "source_code", "source")
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def save_relevance_labels(conn, labels: Iterable[dict[str, Any]], rules_version: str) -> int:
+    labels = list(labels)
+    seen = set()
+    for item in labels:
+        material_id = item.get("material_id")
+        label = item.get("label")
+        if type(material_id) is not int or material_id < 1 or label not in CLASSIFICATIONS:
+            raise ValueError("Invalid relevance label")
+        if material_id in seen:
+            raise ValueError("Duplicate relevance label in batch")
+        seen.add(material_id)
+    if not labels:
+        return 0
+
+    ids = [item["material_id"] for item in labels]
+    with conn.transaction():
+        eligible = {
+            row[0]
+            for row in conn.execute(
+                """SELECT requested.id
+                   FROM unnest(%s::integer[]) AS requested(id)
+                   JOIN materials m ON m.id = requested.id
+                   JOIN relevance_assessments a ON a.material_id = m.id AND a.rules_version = %s""",
+                (ids, rules_version),
+            ).fetchall()
+        }
+        if eligible != set(ids):
+            raise ValueError("Labels include materials without a current relevance assessment")
+        for item in labels:
+            conn.execute(
+                """INSERT INTO relevance_labels (material_id, label)
+                   VALUES (%s, %s)
+                   ON CONFLICT (material_id) DO UPDATE SET label = EXCLUDED.label, labeled_at = now()""",
+                (item["material_id"], item["label"]),
+            )
+    return len(labels)
+
+
+def relevance_evaluation_rows(conn, rules_version: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT m.id, m.title, a.classification, l.label
+           FROM relevance_labels l
+           JOIN relevance_assessments a ON a.material_id = l.material_id AND a.rules_version = %s
+           JOIN materials m ON m.id = l.material_id
+           ORDER BY m.id""",
+        (rules_version,),
+    ).fetchall()
+    columns = ("material_id", "title", "predicted", "label")
     return [dict(zip(columns, row)) for row in rows]
 
 

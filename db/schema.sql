@@ -36,6 +36,29 @@ CREATE TABLE IF NOT EXISTS materials (
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'done', 'skipped', 'failed'))
 );
 
+CREATE TABLE IF NOT EXISTS relevance_assessments (
+    id BIGSERIAL PRIMARY KEY,
+    material_id INTEGER NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
+    rules_version TEXT NOT NULL,
+    classification TEXT NOT NULL CHECK (classification IN (
+        'practical_change', 'seller_action_or_risk', 'industry_context', 'irrelevant', 'uncertain'
+    )),
+    score SMALLINT NOT NULL CHECK (score BETWEEN 0 AND 100),
+    rule_codes TEXT[] NOT NULL DEFAULT '{}',
+    platforms TEXT[] NOT NULL DEFAULT '{}',
+    explanation TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (material_id, rules_version)
+);
+
+CREATE TABLE IF NOT EXISTS relevance_labels (
+    material_id INTEGER PRIMARY KEY REFERENCES materials(id) ON DELETE CASCADE,
+    label TEXT NOT NULL CHECK (label IN (
+        'practical_change', 'seller_action_or_risk', 'industry_context', 'irrelevant', 'uncertain'
+    )),
+    labeled_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id SERIAL PRIMARY KEY,
     event_key TEXT NOT NULL UNIQUE,

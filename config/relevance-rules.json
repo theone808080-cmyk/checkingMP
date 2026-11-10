@@ -1,0 +1,32 @@
+{
+  "version": "1",
+  "platforms": {
+    "ozon": {
+      "label": "Ozon",
+      "terms": ["ozon", "озон"]
+    },
+    "wildberries": {
+      "label": "Wildberries",
+      "terms": ["wildberries", "вайлдберриз", "вб"]
+    },
+    "yandex_market": {
+      "label": "Яндекс Маркет",
+      "terms": ["яндекс маркет", "yandex market"]
+    },
+    "honest_sign": {
+      "label": "Честный знак",
+      "terms": ["честный знак", "честного знака", "честном знаке", "честный-знак", "honest sign"]
+    }
+  },
+  "topics": {
+    "tariffs": ["тариф", "комисс", "сбор за", "fee", "commission", "pricing", "tariff"],
+    "logistics": ["достав", "логист", "склад", "поставк", "отгруз", "warehouse", "delivery", "logistics", "fulfillment"],
+    "advertising": ["реклам", "продвиж", "ads", "advertising", "campaign"],
+    "seller_rules": ["правил", "услови", "оферт", "требован", "штраф", "аккаунт", "карточк товара", "seller policy", "listing", "penalty"],
+    "marking": ["маркиров", "код маркиров", "data matrix", "честный знак", "honest sign"]
+  },
+  "change_terms": ["измен", "обнов", "новый", "новые", "начал действ", "вступ", "поднял", "увелич", "снизил", "вводит", "запуст", "обязател", "deadline", "effective", "new rule", "changed", "increase", "introduced", "launch"],
+  "seller_terms": ["продавц", "селлер", "seller", "кабинет продавца", "поставк", "отгруз", "карточк товара", "аккаунт"],
+  "industry_terms": ["маркетплейс", "электронной торговл", "электронн торгов", "интернет-торгов", "онлайн-торгов", "e-commerce", "ecommerce", "retail", "ритейл", "marketplace"],
+  "irrelevant_terms": ["футбол", "хоккей", "баскетбол", "кино", "фильм", "музык", "концерт", "football", "hockey", "basketball", "movie", "concert", "celebrity"]
+}
