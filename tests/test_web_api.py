@@ -62,10 +62,12 @@ class WebTests(unittest.TestCase):
         self.import_mock = self.importer.start()
         self.addCleanup(self.importer.stop)
 
-    def request(self, method, path, auth=None, body=None):
+    def request(self, method, path, auth=None, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
-        headers = {"Authorization": auth} if auth else {}
-        conn.request(method, path, body=body, headers=headers)
+        request_headers = dict(headers or {})
+        if auth:
+            request_headers["Authorization"] = auth
+        conn.request(method, path, body=body, headers=request_headers)
         response = conn.getresponse()
         result = response.status, response.read()
         conn.close()
@@ -138,6 +140,101 @@ class WebTests(unittest.TestCase):
         ):
             with self.subTest(query=query):
                 self.assertEqual(self.request("GET", "/api/findings?" + query, basic)[0], 400)
+
+    def test_finding_counts_api_uses_findings_authorization_and_filters(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        path = "/api/findings/counts?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official"
+        expected = {"period": {"all": 1}, "platform": {"all": 1}, "importance": {"all": 1},
+                    "topic_status": {"topics": [], "verification": {"all": 1}}, "source_type": {"all": 1}}
+        self.assertEqual(self.request("GET", "/api/findings/counts")[0], 401)
+        with patch.object(web.db, "finding_filter_counts", return_value=expected, create=True) as count:
+            status, body = self.request("GET", path, basic)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), expected)
+        count.assert_called_once_with(self.conn, {
+            "period": "week", "platform": "ozon", "importance": 4, "topic": "log",
+            "verification": "needs_check", "trust": "official",
+        })
+        for query in ("importance=0", "cursor=old", "unexpected=yes", "period=week&period=today"):
+            with self.subTest(query=query):
+                self.assertEqual(self.request("GET", "/api/findings/counts?" + query, basic)[0], 400)
+
+    def test_source_review_page_requires_basic_auth(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        self.assertEqual(self.request("GET", "/sources/review")[0], 401)
+        self.assertEqual(self.request("GET", "/api/source-candidates")[0], 401)
+        with patch.object(web, "render_source_review", return_value="review page", create=True):
+            status, body = self.request("GET", "/sources/review", basic)
+        self.assertEqual((status, body), (200, b"review page"))
+
+    def test_processing_trace_is_basic_auth_only_and_read_only(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        path = "/api/findings/12/trace"
+        self.assertEqual(self.request("GET", path)[0], 401)
+        with patch.dict(web.os.environ, {"TELEGRAM_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "42"}):
+            session = web.telegram_auth.new_session(TOKEN, "42")
+            self.assertEqual(self.request("GET", path, headers={"Cookie": f"radar_session={session}"})[0], 401)
+        result = {"finding": {"id": 12}, "materials": []}
+        with patch.object(web.db, "finding_trace", return_value=result) as fetch:
+            status, body = self.request("GET", path, basic)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), result)
+        fetch.assert_called_once_with(self.conn, 12)
+        with patch.object(web.db, "finding_trace", return_value=None):
+            self.assertEqual(self.request("GET", "/api/findings/12/trace", basic)[0], 404)
+
+    def test_source_approval_requires_same_origin_and_server_probe(self):
+        from source_discovery.probe import ProbeResult
+
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        body = json.dumps({"action": "approve", "fields": {
+            "name": "Seller", "collection_url": "https://seller.example/",
+            "kind": "rss", "category": "ozon", "trust": "industry", "scope": "ozon sellers",
+        }})
+        headers = {"Content-Type": "application/json", "Origin": "https://attacker.example"}
+        with patch.object(web, "probe_source", return_value=ProbeResult(True, "rss", "https://seller.example/feed.xml"), create=True) as probe:
+            self.assertEqual(self.request("POST", "/api/source-candidates/1", basic, body, headers)[0], 403)
+            probe.assert_not_called()
+
+        headers["Origin"] = origin
+        candidate = {"id": 1, "kind": "rss", "collection_url": "https://seller.example/feed.xml"}
+        with patch.object(web.db, "list_source_candidates", return_value=[candidate], create=True), \
+             patch.object(web, "probe_source", return_value=ProbeResult(True, "rss", "https://seller.example/feed.xml"), create=True) as probe, \
+             patch.object(web.db, "review_source_candidate", return_value={"status": "approved", "source_code": "discovered_test"}, create=True) as review:
+            status, response = self.request("POST", "/api/source-candidates/1", basic, body, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(response)["status"], "approved")
+        probe.assert_called_once_with("https://seller.example/", kind="rss")
+        self.assertTrue(review.call_args.args[4]["ok"])
+        self.assertEqual(review.call_args.args[3]["collection_url"], "https://seller.example/feed.xml")
+
+    def test_source_approval_passes_validated_access_metadata_to_the_safe_probe(self):
+        from source_discovery.probe import ProbeResult
+
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        fields = {
+            "access_public": True, "access_requires_credentials": False,
+            "access_rate_limit": "60/hour", "access_cost": "free",
+        }
+        body = json.dumps({"action": "approve", "fields": fields})
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        candidate = {"id": 1, "kind": "rss", "collection_url": "https://seller.example/feed.xml"}
+        with patch.object(web.db, "list_source_candidates", return_value=[candidate], create=True), \
+             patch.object(web, "probe_source", return_value=ProbeResult(True, "rss", "https://seller.example/feed.xml"), create=True), \
+             patch.object(web.db, "review_source_candidate", return_value={"status": "approved", "source_code": "discovered_test"}, create=True) as review:
+            self.assertEqual(self.request("POST", "/api/source-candidates/1", basic, body, headers)[0], 200)
+        self.assertEqual({key: review.call_args.args[3][key] for key in fields}, fields)
+
+    def test_client_cannot_supply_probe_result(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        body = json.dumps({"action": "approve", "fields": {}, "probe": {"ok": True}})
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        with patch.object(web.db, "review_source_candidate", create=True) as review:
+            self.assertEqual(self.request("POST", "/api/source-candidates/1", basic, body, headers)[0], 400)
+            review.assert_not_called()
 
 
 

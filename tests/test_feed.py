@@ -25,11 +25,12 @@ class FeedPostgresTests(unittest.TestCase):
             id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
             kind TEXT NOT NULL, url TEXT NOT NULL, trust TEXT NOT NULL, scope TEXT NOT NULL,
             active BOOLEAN DEFAULT true, last_checked_at TIMESTAMPTZ, last_error TEXT,
-            category TEXT)""")
+            category TEXT, managed_by TEXT NOT NULL DEFAULT 'config')""")
         self.conn.execute("""CREATE TEMP TABLE materials (
             id SERIAL PRIMARY KEY, source_id INTEGER NOT NULL, url TEXT NOT NULL,
             title TEXT NOT NULL, text TEXT, published_at TIMESTAMPTZ,
-            collected_at TIMESTAMPTZ NOT NULL, status TEXT NOT NULL)""")
+            collected_at TIMESTAMPTZ NOT NULL, status TEXT NOT NULL,
+            translation_status TEXT NOT NULL DEFAULT 'legacy', title_ru TEXT, text_ru TEXT)""")
         self.conn.execute("""CREATE TEMP TABLE feed_snapshots (
             id UUID PRIMARY KEY, period TEXT NOT NULL, platform TEXT NOT NULL,
             material_ids INTEGER[] NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
@@ -73,6 +74,18 @@ class FeedPostgresTests(unittest.TestCase):
         for platform, title in (("wildberries", "yesterday"), ("chestny_znak", "week-first")):
             self.assertEqual(db.feed_materials(self.conn, platform=platform)["materials"][0]["title"], title)
         self.assertEqual(db.feed_materials(self.conn, platform="yandex")["total"], 1)
+
+    def test_feed_returns_translation_fields_without_replacing_original(self):
+        timestamp = datetime.now(timezone.utc)
+        self.add("ozon_telegram", "The new rule", timestamp, timestamp, "done")
+        self.conn.execute("""UPDATE materials SET translation_status='ready', title_ru='Новое правило',
+            text_ru='Поставщик должен обновить маркировку.' WHERE title='The new rule'""")
+        item = db.feed_materials(self.conn)["materials"][0]
+        self.assertEqual(item["title"], "The new rule")
+        self.assertEqual(item["text"], "original The new rule")
+        self.assertEqual(item.get("translation_status"), "ready")
+        self.assertEqual(item.get("title_ru"), "Новое правило")
+        self.assertEqual(item.get("text_ru"), "Поставщик должен обновить маркировку.")
 
     def test_stable_cursor_does_not_repeat_ties_or_newer_inserts(self):
         timestamp = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -126,10 +139,67 @@ class FeedPostgresTests(unittest.TestCase):
                     kind TEXT NOT NULL, url TEXT NOT NULL, trust TEXT NOT NULL, scope TEXT NOT NULL,
                     active BOOLEAN DEFAULT true, last_checked_at TIMESTAMPTZ, last_error TEXT)""")
                 conn.execute("INSERT INTO sources (code, name, kind, url, trust, scope) VALUES ('ozon_telegram', 'old', 'telegram', 'https://example.org', 'official', 'old')")
+                conn.execute("""CREATE TABLE runs (
+                    id SERIAL PRIMARY KEY, service TEXT NOT NULL, status TEXT NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ,
+                    items INTEGER NOT NULL DEFAULT 0, note TEXT)""")
+                conn.execute("""CREATE TABLE materials (
+                    id SERIAL PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id),
+                    run_id INTEGER REFERENCES runs(id), url TEXT NOT NULL, title TEXT NOT NULL,
+                    text TEXT, published_at TIMESTAMPTZ, collected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    fingerprint TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','done','skipped','failed')))""")
+                conn.execute("""INSERT INTO materials(source_id,url,title,text,fingerprint)
+                    VALUES (1,'https://example.org/old','Old English headline','Old English excerpt','old-fingerprint')""")
                 db.init_schema(conn)
                 db.init_schema(conn)
                 db.sync_sources(conn)
                 self.assertEqual(conn.execute("SELECT category FROM sources WHERE code = 'ozon_telegram'").fetchone()[0], 'ozon')
+                columns = conn.execute("""SELECT column_name FROM information_schema.columns
+                    WHERE table_schema='feed_migration_test' AND table_name='materials'
+                    AND column_name = ANY(%s) ORDER BY column_name""",
+                    (['text_ru', 'title_ru', 'translation_status'],)).fetchall()
+                self.assertEqual(columns, [('text_ru',), ('title_ru',), ('translation_status',)])
+                self.assertEqual(conn.execute("""SELECT title,text,translation_status,title_ru,text_ru
+                    FROM materials WHERE fingerprint='old-fingerprint'""").fetchone(),
+                    ('Old English headline', 'Old English excerpt', 'legacy', None, None))
+                run_id = db.start_run(conn, 'collector')
+                self.assertTrue(db.add_material(conn, 1, run_id, {
+                    'url': 'https://example.org/new', 'title': 'New English headline',
+                    'text': 'New English excerpt', 'published_at': None,
+                }))
+                new_row = conn.execute("""SELECT id,title,text,translation_status,title_ru,text_ru
+                    FROM materials WHERE url='https://example.org/new'""").fetchone()
+                self.assertEqual(new_row[1:], ('New English headline', 'New English excerpt', 'pending', None, None))
+                pending = {item['title']: item['translation_status'] for item in db.pending_materials(conn)}
+                self.assertEqual(pending, {'Old English headline': 'legacy', 'New English headline': 'pending'})
+                reviewed_signal = {
+                    'material_ids': [new_row[0]], 'platform': 'Ozon', 'topic': 'rules',
+                    'importance': 3, 'summary': 'Проверьте маркировку',
+                    'recommended_action': 'Обновить карточку', 'verification': 'needs_check',
+                }
+                with conn.transaction():
+                    with self.assertRaisesRegex(ValueError, 'translation'):
+                        db.import_signals(conn, [reviewed_signal])
+                with conn.transaction():
+                    with self.assertRaisesRegex(ValueError, 'text'):
+                        db.import_signals(conn, [reviewed_signal], translations=[{
+                            'material_id': new_row[0], 'title_ru': 'Новый заголовок', 'text_ru': '',
+                        }])
+                self.assertEqual(conn.execute("SELECT status,translation_status FROM materials WHERE id=%s",
+                                              (new_row[0],)).fetchone(), ('new', 'pending'))
+                self.assertEqual(conn.execute("SELECT count(*) FROM events").fetchone()[0], 0)
+                db.import_signals(conn, [reviewed_signal], translations=[{
+                    'material_id': new_row[0], 'title_ru': 'Н' * 501,
+                    'text_ru': 'Новый фрагмент на русском',
+                }])
+                saved = conn.execute("""SELECT title,text,translation_status,title_ru,text_ru,status
+                    FROM materials WHERE id=%s""", (new_row[0],)).fetchone()
+                self.assertEqual(saved, ('New English headline', 'New English excerpt', 'ready',
+                                         'Н' * 501, 'Новый фрагмент на русском', 'done'))
+                legacy = conn.execute("""SELECT title,text,translation_status,title_ru,text_ru
+                    FROM materials WHERE fingerprint='old-fingerprint'""").fetchone()
+                self.assertEqual(legacy, ('Old English headline', 'Old English excerpt', 'legacy', None, None))
             finally:
                 conn.execute('ROLLBACK')
 

@@ -59,6 +59,13 @@ class MiniAppTests(unittest.TestCase):
                                 cwd=root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node is required for JavaScript interaction test')
+    def test_source_feed_displays_new_translations_and_hides_pending_originals(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(['node', str(root / 'tests' / 'miniapp_feed_translation_test.js')],
+                                cwd=root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -27,6 +27,18 @@ class FindingFilterValidationTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 db.feed_findings(None, **kwargs)
 
+    def test_filter_counts_reject_invalid_filters_before_query(self):
+        for filters in (
+            {"period": "tomorrow"},
+            {"platform": "unknown"},
+            {"importance": True},
+            {"importance": 6},
+            {"verification": "unknown"},
+            {"trust": "unknown"},
+        ):
+            with self.subTest(filters=filters), self.assertRaises(ValueError):
+                db.finding_filter_counts(None, filters)
+
 
 class FindingQueryTests(unittest.TestCase):
     def test_builds_parameterized_query_with_all_optional_filters(self):
@@ -187,6 +199,46 @@ class FindingPostgresTests(unittest.TestCase):
         second = db.feed_findings(self.conn, cursor=first["next_cursor"], limit=1)
         self.assertEqual([item["id"] for item in second["findings"]], [old_ids[1]])
         self.assertEqual(second["total"], 3)
+
+    def test_filter_counts_use_other_groups_and_full_result_set(self):
+        stamp = datetime.now(timezone.utc)
+        for index in range(21):
+            material = self.add_material("ozon_telegram", f"counter-ozon-{index}", stamp - timedelta(seconds=index))
+            self.add_finding(f"counter-ozon-{index}", "Ozon", 5, stamp - timedelta(seconds=index), [material], topic="logistics")
+        wildberries = self.add_material("wb_telegram", "counter-wb", stamp)
+        self.add_finding("counter-wb", "Wildberries", 3, stamp, [wildberries], verification="confirmed", topic="returns")
+        regulator = self.add_material("rospotrebnadzor_federal", "counter-regulator", stamp)
+        self.add_finding("counter-regulator", "industry", 4, stamp, [regulator], topic="rules")
+
+        filters = {"period": "week", "platform": "ozon", "importance": 5,
+                   "topic": "logistics", "verification": "needs_check", "trust": "official"}
+        counts = db.finding_filter_counts(self.conn, filters)
+
+        self.assertEqual(db.feed_findings(self.conn, **filters, limit=1)["total"], 21)
+        self.assertEqual(counts["period"]["all"], 21)
+        self.assertEqual(counts["period"]["week"], 21)
+        self.assertEqual(counts["platform"]["all"], 21)
+        self.assertEqual(counts["platform"]["ozon"], 21)
+        self.assertEqual(counts["importance"]["all"], 21)
+        self.assertEqual(counts["importance"]["5"], 21)
+        self.assertEqual(counts["source_type"]["all"], 21)
+        self.assertEqual(counts["source_type"]["official"], 21)
+        self.assertEqual(counts["source_type"]["regulator"], 0)
+        self.assertEqual(counts["topic_status"]["verification"]["needs_check"], 21)
+        self.assertEqual(counts["topic_status"]["topics"], [{"value": "logistics", "count": 21}])
+
+    def test_filter_counts_show_zero_for_other_groups_when_current_filter_matches_nothing(self):
+        stamp = datetime.now(timezone.utc)
+        material = self.add_material("ozon_telegram", "counter-none", stamp)
+        self.add_finding("counter-none", "Ozon", 4, stamp, [material], topic="logistics")
+
+        counts = db.finding_filter_counts(self.conn, {"topic": "absent"})
+
+        self.assertEqual(counts["period"]["all"], 0)
+        self.assertEqual(counts["platform"]["all"], 0)
+        self.assertEqual(counts["importance"]["all"], 0)
+        self.assertEqual(counts["source_type"]["all"], 0)
+        self.assertEqual(counts["topic_status"]["topics"], [{"value": "logistics", "count": 1}])
 
     def test_legacy_severity_migrates_twice_and_keeps_event_material_link(self):
         schema = "legacy_event_" + uuid.uuid4().hex

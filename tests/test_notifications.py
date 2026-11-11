@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import psycopg
+import db
 import main
 from notifier import telegram
 
@@ -14,15 +15,22 @@ CONFIG = {'TELEGRAM_TOKEN': '123456:synthetic_token', 'TELEGRAM_CHAT_ID': '12345
 
 
 class NotificationTests(unittest.TestCase):
+    def cycle_storage(self):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        connect = stack.enter_context(patch.object(main.db, "connect"))
+        connect.return_value.__enter__.return_value = object()
+        stack.enter_context(patch.object(main.db, "init_schema"))
+        stack.enter_context(patch.object(main.db, "start_cycle", return_value=1))
+        stack.enter_context(patch.object(main, "_record_cycle_stage"))
+        stack.enter_context(patch.object(main, "_finish_cycle"))
+        return stack
+
     def test_failed_initial_baseline_stops_collection_until_retry(self):
-        with patch.dict(os.environ, CONFIG, clear=True), \
-             patch.object(main.db, 'connect') as connect, \
-             patch.object(main.db, 'init_schema'), \
-             patch.object(telegram, 'initialize', side_effect=[OSError('database offline'), None]), \
-             patch.object(main, 'collect') as collect, \
-             patch.object(main, 'send_notifications'), \
-             patch.object(main, 'process'):
-            connect.return_value.__enter__.return_value = object()
+        with self.cycle_storage(), patch.dict(os.environ, CONFIG, clear=True), \
+             patch.object(telegram, "initialize", side_effect=[OSError("database offline"), None]), \
+             patch.object(main, "collect") as collect, patch.object(main, "send_notifications"), \
+             patch.object(main, "process"):
             with self.assertRaises(RuntimeError):
                 main.cycle()
             collect.assert_not_called()
@@ -30,30 +38,32 @@ class NotificationTests(unittest.TestCase):
             collect.assert_called_once()
 
     def test_unconfigured_notifications_do_not_stop_collection(self):
-        with patch.dict(os.environ, {}, clear=True), patch.object(main, 'collect') as collect, \
-             patch.object(main, 'process'), patch.object(main.db, 'connect') as connect:
+        with self.cycle_storage(), patch.dict(os.environ, {}, clear=True), \
+             patch.object(main, "collect") as collect, patch.object(main, "process"), \
+             patch.object(telegram, "initialize") as initialize:
             main.cycle()
         collect.assert_called_once()
-        connect.assert_not_called()
+        initialize.assert_not_called()
 
     def test_partial_configuration_does_not_stop_collection(self):
-        with patch.dict(os.environ, {'TELEGRAM_TOKEN': CONFIG['TELEGRAM_TOKEN'],
-                                     'TELEGRAM_CHAT_ID': CONFIG['TELEGRAM_CHAT_ID']}, clear=True), \
-             patch.object(main, 'collect') as collect, patch.object(main, 'process'), \
-             patch.object(main.db, 'connect') as connect:
+        with self.cycle_storage(), patch.dict(os.environ, {
+                "TELEGRAM_TOKEN": CONFIG["TELEGRAM_TOKEN"],
+                "TELEGRAM_CHAT_ID": CONFIG["TELEGRAM_CHAT_ID"]}, clear=True), \
+             patch.object(main, "collect") as collect, patch.object(main, "process"), \
+             patch.object(telegram, "initialize") as initialize:
             main.cycle()
         collect.assert_called_once()
-        connect.assert_not_called()
+        initialize.assert_not_called()
 
     def test_cycle_baselines_before_collection_and_notifies_before_processing(self):
         calls = []
-        with patch.object(main, 'prepare_notifications', side_effect=lambda: calls.append('baseline')), \
-             patch.object(main, 'collect', side_effect=lambda: calls.append('collect')), \
-             patch.object(main, 'send_notifications', side_effect=lambda _config: calls.append('notify')), \
-             patch.object(main, 'process', side_effect=lambda: calls.append('process')):
+        with self.cycle_storage(), \
+             patch.object(main, "prepare_notifications", side_effect=lambda: calls.append("baseline")), \
+             patch.object(main, "collect", side_effect=lambda **_kwargs: calls.append("collect")), \
+             patch.object(main, "send_notifications", side_effect=lambda _config, **_kwargs: calls.append("notify") or "skipped"), \
+             patch.object(main, "process", side_effect=lambda **_kwargs: calls.append("process")):
             main.cycle()
-        self.assertEqual(calls, ['baseline', 'collect', 'notify', 'process'])
-
+        self.assertEqual(calls, ["baseline", "collect", "notify", "process"])
     def test_payload_and_network_failure_do_not_expose_token(self):
         with patch.dict(os.environ, CONFIG, clear=True):
             config = telegram.settings()
@@ -119,8 +129,23 @@ class NotificationPostgresTests(unittest.TestCase):
             try:
                 with patch.object(telegram, 'send_message') as send:
                     self.assertFalse(telegram.notify_new_materials(self.conn, CONFIG))
+                    self.assertEqual(telegram.notify_new_materials_status(self.conn, CONFIG), ("busy", None))
                     send.assert_not_called()
             finally:
                 holder.execute('SELECT pg_advisory_unlock(%s)', (telegram.LOCK_ID,))
+
+    def test_sent_batch_and_cycle_delivery_proof_commit_together(self):
+        telegram.initialize(self.conn)
+        self.conn.execute('INSERT INTO materials DEFAULT VALUES')
+        cycle_id = db.start_cycle(self.conn)
+        target = db.set_notification_target(self.conn, cycle_id)
+        with patch.object(telegram, 'send_message', return_value=42):
+            status, delivered_ids = telegram.notify_new_materials_status(
+                self.conn, CONFIG, cycle_id=cycle_id)
+        self.assertEqual(status, "sent")
+        self.assertEqual(delivered_ids, target)
+        row = self.conn.execute("""SELECT notification_status, notification_delivered_material_ids
+                                  FROM cycles WHERE id = %s""", (cycle_id,)).fetchone()
+        self.assertEqual(row, ("sent", delivered_ids))
 if __name__ == '__main__':
     unittest.main()

@@ -27,10 +27,19 @@ class Connection:
         return self
 
     def fetchall(self):
+        if self.query.startswith("SELECT id, source_id, run_id"):
+            return [(item, 101, 202) for item in self.ids]
         return [(i,) for i in self.ids]
 
 
-BATCH = [{"material_id": 1, "title": "Example"}, {"material_id": 2, "title": "Other"}]
+BATCH = [
+    {"material_id": 1, "title": "Example", "translation_status": "pending", "text": "English excerpt"},
+    {"material_id": 2, "title": "Другая новость", "translation_status": "pending", "text": "Другой текст"},
+]
+TRANSLATIONS = [
+    {"material_id": 1, "title_ru": "Пример", "text_ru": "Английский фрагмент"},
+    {"material_id": 2, "title_ru": "Другая новость", "text_ru": "Другой текст"},
+]
 SIGNAL = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "importance": 3, "summary": "Summary", "recommended_action": "Check", "verification": "needs_check"}
 
 
@@ -44,17 +53,27 @@ class WorkerTests(unittest.TestCase):
         self.actual_import = worker.db.import_signals
         self.pending = patch.object(worker.db, "pending_materials", return_value=BATCH)
         self.importer = patch.object(worker.db, "import_signals", return_value=(1, 1, 1))
+        self.filterer = patch.object(worker, "assess_pending", return_value=0)
+        self.trace_candidates = patch.object(worker.db, "pending_relevance_materials", return_value=[])
+        self.trace_writer = patch.object(worker.db, "record_trace_attempt", return_value=1)
         self.pending.start()
         self.import_mock = self.importer.start()
+        self.filter_mock = self.filterer.start()
+        self.trace_candidates.start()
+        self.trace_writer.start()
         self.addCleanup(self.pending.stop)
         self.addCleanup(self.importer.stop)
+        self.addCleanup(self.filterer.stop)
+        self.addCleanup(self.trace_candidates.stop)
+        self.addCleanup(self.trace_writer.stop)
         env = patch.dict(worker.os.environ, {"OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY": "secret", "OPENROUTER_MODEL": "test", "OPENROUTER_TIMEOUT": "5", "OPENROUTER_BATCH_SIZE": "2"}, clear=True)
         env.start()
         self.addCleanup(env.stop)
 
     def test_valid_completion_and_request(self):
-        signal = {**SIGNAL, "platform": "WB/Ozon"}
-        payload = {"signals": [signal], "skipped_material_ids": [2]}
+        signal = {**SIGNAL, "platform": "WB/Ozon", "topic": "Логистика",
+                  "summary": "Изменились условия доставки", "recommended_action": "Проверить отгрузки"}
+        payload = {"signals": [signal], "skipped_material_ids": [2], "translations": TRANSLATIONS}
         with patch.object(worker, "open_url", return_value=response(json.dumps(payload))) as http:
             self.assertEqual(worker.process(self.conn), (1, 1, 1))
         req = http.call_args.args[0]
@@ -65,30 +84,81 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(json.loads(req.data)["response_format"], {"type": "json_object"})
         self.assertEqual(json.loads(req.data)["max_tokens"], 2500)
         self.assertEqual(json.loads(req.data)["model"], "test")
-        self.assertIn("importance (integer 1-5", json.loads(req.data)["messages"][0]["content"])
+        prompt = json.loads(req.data)["messages"][0]["content"]
+        self.assertIn("importance (integer 1-5", prompt)
+        self.assertIn("in Russian", prompt)
         imported_signal = {**signal, "platform": "Межплощадочная: Ozon, Wildberries", "verification": "needs_check"}
-        self.import_mock.assert_called_once_with(self.conn, [imported_signal], [2], reject_confirmed=True)
+        self.import_mock.assert_called_once_with(self.conn, [imported_signal], [2], translations=TRANSLATIONS, reject_confirmed=True)
         self.assertEqual(self.conn.transactions, 1)
+
+    def test_requires_complete_unique_translations_for_pending_materials(self):
+        valid = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        result = worker.validate(valid, BATCH)
+        self.assertEqual(result["translations"], TRANSLATIONS)
+        long_title = "Н" * 501
+        long_title_result = worker.validate({**valid, "translations": [
+            {**TRANSLATIONS[0], "title_ru": long_title}, TRANSLATIONS[1]
+        ]}, BATCH)
+        self.assertEqual(long_title_result["translations"][0]["title_ru"], long_title)
+        invalid = (
+            [],
+            [TRANSLATIONS[0]],
+            [TRANSLATIONS[0], TRANSLATIONS[0]],
+            [TRANSLATIONS[0], {**TRANSLATIONS[1], "material_id": 99}],
+            [{**TRANSLATIONS[0], "title_ru": " "}, TRANSLATIONS[1]],
+            [{**TRANSLATIONS[0], "text_ru": ""}, TRANSLATIONS[1]],
+            [{**TRANSLATIONS[0], "text_ru": "x" * 401}, TRANSLATIONS[1]],
+        )
+        for translations in invalid:
+            with self.subTest(translations=translations), self.assertRaises(ValueError):
+                worker.validate({**valid, "translations": translations}, BATCH)
+
+    def test_translation_only_call_uses_existing_model_and_validates_results(self):
+        payload = {"translations": TRANSLATIONS}
+        with patch.object(worker, "open_url", return_value=response(json.dumps(payload))) as http:
+            self.assertEqual(worker.translate(BATCH), TRANSLATIONS)
+        request = http.call_args.args[0]
+        body = json.loads(request.data)
+        self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertIn("Translate non-Russian content into Russian", body["messages"][0]["content"])
+    def test_shadow_filter_runs_before_model_processing(self):
+        calls = []
+        payload = {"signals": [{**SIGNAL, "material_ids": [1]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        with patch.object(worker, "assess_pending", create=True, side_effect=lambda _conn: calls.append("filter")), \
+             patch.object(worker, "infer", side_effect=lambda _batch: calls.append("model") or payload):
+            result = worker.process(self.conn)
+
+        self.assertEqual(result, (1, 1, 1))
+        self.assertEqual(calls, ["filter", "model"])
+
+    def test_filter_failure_does_not_stop_model_processing(self):
+        payload = {"signals": [{**SIGNAL, "material_ids": [1]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        with patch.object(worker, "assess_pending", create=True, side_effect=RuntimeError("filter failed")) as filter_mock, \
+             patch.object(worker, "infer", return_value=payload):
+            result = worker.process(self.conn)
+
+        self.assertEqual(result, (1, 1, 1))
+        filter_mock.assert_called_once_with(self.conn)
 
     def test_model_importance_must_be_integer_between_one_and_five(self):
         for value in range(1, 6):
             with self.subTest(value=value):
-                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": []}
+                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": [], "translations": TRANSLATIONS}
                 self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["importance"], value)
         invalid_values = (None, True, False, 0, 6, 2.5, "3")
         for value in invalid_values:
             with self.subTest(value=value), self.assertRaises(ValueError):
-                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": []}
+                payload = {"signals": [{**SIGNAL, "importance": value}], "skipped_material_ids": [], "translations": TRANSLATIONS}
                 worker.validate(payload, BATCH)
         with self.assertRaises(ValueError):
-            payload = {"signals": [{key: value for key, value in SIGNAL.items() if key != "importance"}], "skipped_material_ids": []}
+            payload = {"signals": [{key: value for key, value in SIGNAL.items() if key != "importance"}], "skipped_material_ids": [], "translations": TRANSLATIONS}
             worker.validate(payload, BATCH)
 
     def test_model_platforms_are_canonicalized_and_unknown_values_rejected(self):
         for source, expected in (("Яндекс.Маркет", "Яндекс Маркет"), ("WB/Ozon", "Межплощадочная: Ozon, Wildberries")):
-            payload = {"signals": [{**SIGNAL, "platform": source}], "skipped_material_ids": []}
+            payload = {"signals": [{**SIGNAL, "platform": source}], "skipped_material_ids": [], "translations": TRANSLATIONS}
             self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["platform"], expected)
-        payload = {"signals": [{**SIGNAL, "platform": "unknown marketplace"}], "skipped_material_ids": []}
+        payload = {"signals": [{**SIGNAL, "platform": "unknown marketplace"}], "skipped_material_ids": [], "translations": TRANSLATIONS}
         with self.assertRaises(ValueError):
             worker.validate(payload, BATCH)
 
@@ -97,8 +167,9 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(worker.settings()[2], "openai/gpt-4.1-nano")
 
     def test_stale_batch_is_rejected_before_import(self):
-        payload = {"signals": [SIGNAL], "skipped_material_ids": [2]}
-        with patch.object(self.conn, "fetchall", return_value=[(1,)]), patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
+        payload = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        with patch.object(self.conn, "fetchall", side_effect=lambda: [(1, 101, 202)] if "SELECT id, source_id, run_id" in self.conn.query else [(1,)]), \
+             patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
             with self.assertRaisesRegex(ValueError, "stale"):
                 worker.process(self.conn)
         self.import_mock.assert_not_called()
@@ -111,6 +182,8 @@ class WorkerTests(unittest.TestCase):
                 return self
             def fetchone(self):
                 return None
+            def fetchall(self):
+                return []
         conn = ConflictConnection()
         with self.assertRaisesRegex(ValueError, "confirmed"):
             self.actual_import(conn, [SIGNAL], reject_confirmed=True)
@@ -137,7 +210,7 @@ class WorkerTests(unittest.TestCase):
     def test_model_verification_is_always_unconfirmed_locally(self):
         for value in ("confirmed", "unexpected", None):
             signal = {**SIGNAL, "verification": value}
-            payload = {"signals": [signal], "skipped_material_ids": [2]}
+            payload = {"signals": [signal], "skipped_material_ids": [2], "translations": TRANSLATIONS}
             with self.subTest(value=value), patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
                 worker.process(self.conn)
                 self.assertEqual(self.import_mock.call_args.args[1][0]["verification"], "needs_check")
@@ -152,17 +225,21 @@ class WorkerTests(unittest.TestCase):
 
     def test_cycle_collects_before_processing(self):
         calls = []
-        with patch.object(cli, "collect", side_effect=lambda: calls.append("collect")), patch.object(cli, "process", side_effect=lambda: calls.append("process")):
+        with patch.object(cli.db, "connect"), patch.object(cli.db, "init_schema"), \
+             patch.object(cli.db, "start_cycle", return_value=1), \
+             patch.object(cli, "_record_cycle_stage"), patch.object(cli, "_finish_cycle"), \
+             patch.object(cli, "collect", side_effect=lambda **_kwargs: calls.append("collect")), \
+             patch.object(cli, "process", side_effect=lambda **_kwargs: calls.append("process")):
             cli.cycle()
         self.assertEqual(calls, ["collect", "process"])
-
     def test_manual_review_import_preserves_confirmed(self):
         signal = {**SIGNAL, "verification": "confirmed"}
         payload = {"signals": [signal], "skipped_material_ids": []}
-        with patch.object(cli.Path, "read_text", return_value=json.dumps(payload)), patch.object(cli.db, "connect") as connect, patch.object(cli.db, "init_schema"):
+        with patch.object(cli.Path, "read_text", return_value=json.dumps(payload)), patch.object(cli.db, "connect") as connect, patch.object(cli.db, "init_schema"), patch.object(cli, "translate", return_value=TRANSLATIONS[:1]) as translate:
             conn = connect.return_value.__enter__.return_value
             cli.import_review("review.json")
-            self.import_mock.assert_called_once_with(conn, [signal], [])
+            translate.assert_called_once_with([BATCH[0]])
+            self.import_mock.assert_called_once_with(conn, [signal], [], translations=TRANSLATIONS[:1])
 
     def test_failures_never_import(self):
         invalid = ["```json\n{}\n```", '{"signals": [], "signals": [], "skipped_material_ids": []}', json.dumps({"signals": [SIGNAL], "skipped_material_ids": [1]}), json.dumps({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": []}), json.dumps({"signals": [{**SIGNAL, "importance": 9}], "skipped_material_ids": []})]
@@ -200,6 +277,18 @@ class WorkerTests(unittest.TestCase):
                 worker.infer(BATCH)
             self.assertNotIn(key, "".join(traceback.format_exception(caught.exception)))
             self.assertNotIn(key, str(worker.probe()))
+
+    def test_safe_processing_failure_categories_differ_by_failure_type(self):
+        key = "synthetic-secret"
+        errors = []
+        for error in (OSError("offline"), ValueError("invalid response")):
+            with patch.dict(worker.os.environ, {"OPENROUTER_API_KEY": key}), \
+                 patch.object(worker, "open_url", side_effect=error):
+                with self.assertRaises(RuntimeError) as caught:
+                    worker.infer(BATCH)
+                errors.append(caught.exception)
+        self.assertNotEqual(errors[0].failure_signature, errors[1].failure_signature)
+        self.assertNotIn(key, str(errors[0]))
 
     def test_probe(self):
         with patch.object(worker, "open_url", return_value=Response(b'{"data":[{"id":"local"}]}')):
