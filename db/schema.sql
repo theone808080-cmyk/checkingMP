@@ -13,6 +13,20 @@ CREATE TABLE IF NOT EXISTS sources (
 
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'industry';
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS managed_by TEXT NOT NULL DEFAULT 'config';
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS access_public BOOLEAN;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS access_requires_credentials BOOLEAN;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS access_rate_limit TEXT;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS access_cost TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS access_checked_at TIMESTAMPTZ;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS access_check_result TEXT NOT NULL DEFAULT 'unknown';
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='sources'::regclass AND conname='sources_access_cost_check') THEN
+        ALTER TABLE sources ADD CONSTRAINT sources_access_cost_check CHECK (access_cost IN ('free','paid','unknown'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='sources'::regclass AND conname='sources_access_check_result_check') THEN
+        ALTER TABLE sources ADD CONSTRAINT sources_access_check_result_check CHECK (access_check_result IN ('unknown','passed','failed'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS source_candidates (
     id BIGSERIAL PRIMARY KEY,
@@ -31,6 +45,20 @@ CREATE TABLE IF NOT EXISTS source_candidates (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (publisher_domain, collection_url)
 );
+ALTER TABLE source_candidates ADD COLUMN IF NOT EXISTS access_public BOOLEAN;
+ALTER TABLE source_candidates ADD COLUMN IF NOT EXISTS access_requires_credentials BOOLEAN;
+ALTER TABLE source_candidates ADD COLUMN IF NOT EXISTS access_rate_limit TEXT;
+ALTER TABLE source_candidates ADD COLUMN IF NOT EXISTS access_cost TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE source_candidates ADD COLUMN IF NOT EXISTS access_checked_at TIMESTAMPTZ;
+ALTER TABLE source_candidates ADD COLUMN IF NOT EXISTS access_check_result TEXT NOT NULL DEFAULT 'unknown';
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='source_candidates'::regclass AND conname='source_candidates_access_cost_check') THEN
+        ALTER TABLE source_candidates ADD CONSTRAINT source_candidates_access_cost_check CHECK (access_cost IN ('free','paid','unknown'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='source_candidates'::regclass AND conname='source_candidates_access_check_result_check') THEN
+        ALTER TABLE source_candidates ADD CONSTRAINT source_candidates_access_check_result_check CHECK (access_check_result IN ('unknown','passed','failed'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS source_provider_state (
     provider TEXT PRIMARY KEY,

@@ -209,6 +209,24 @@ class WebTests(unittest.TestCase):
         self.assertTrue(review.call_args.args[4]["ok"])
         self.assertEqual(review.call_args.args[3]["collection_url"], "https://seller.example/feed.xml")
 
+    def test_source_approval_passes_validated_access_metadata_to_the_safe_probe(self):
+        from source_discovery.probe import ProbeResult
+
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        fields = {
+            "access_public": True, "access_requires_credentials": False,
+            "access_rate_limit": "60/hour", "access_cost": "free",
+        }
+        body = json.dumps({"action": "approve", "fields": fields})
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        candidate = {"id": 1, "kind": "rss", "collection_url": "https://seller.example/feed.xml"}
+        with patch.object(web.db, "list_source_candidates", return_value=[candidate], create=True), \
+             patch.object(web, "probe_source", return_value=ProbeResult(True, "rss", "https://seller.example/feed.xml"), create=True), \
+             patch.object(web.db, "review_source_candidate", return_value={"status": "approved", "source_code": "discovered_test"}, create=True) as review:
+            self.assertEqual(self.request("POST", "/api/source-candidates/1", basic, body, headers)[0], 200)
+        self.assertEqual({key: review.call_args.args[3][key] for key in fields}, fields)
+
     def test_client_cannot_supply_probe_result(self):
         basic = "Basic " + base64.b64encode(b"user:password").decode()
         origin = f"http://127.0.0.1:{self.server.server_port}"

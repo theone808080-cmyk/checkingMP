@@ -71,6 +71,33 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Google News RSS: работает", body)
         self.assertIn("Exa: не настроен", body)
 
+    def test_source_review_shows_access_requirements_only_in_protected_queue(self):
+        candidate = {
+            "id": 8, "publisher_domain": "publisher.example", "name": "Publisher", "collection_url": "https://publisher.example/feed",
+            "kind": "rss", "category": "ozon", "trust": "official", "scope": "marketplaces", "status": "pending",
+            "probe_status": "passed", "probe_error": None, "example_urls": [],
+            "access_public": True, "access_requires_credentials": False, "access_rate_limit": "60/hour",
+            "access_cost": "unknown", "access_checked_at": None, "access_check_result": "passed",
+        }
+
+        class Connection:
+            def execute(self, *_args, **_kwargs):
+                return Rows([None])
+
+        with patch.object(web.db, "list_source_candidates", return_value=[candidate]), \
+             patch.object(web.db, "exa_pause_until", return_value=None):
+            body = web.render_source_review(Connection())
+
+        for label in (
+            "\u041f\u0443\u0431\u043b\u0438\u0447\u043d\u044b\u0439 \u0434\u043e\u0441\u0442\u0443\u043f",
+            "\u0423\u0447\u0451\u0442\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435",
+            "\u041e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0435 \u0447\u0430\u0441\u0442\u043e\u0442\u044b",
+            "\u0421\u0442\u043e\u0438\u043c\u043e\u0441\u0442\u044c",
+            "\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u044f\u044f \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u0430\u044f \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430",
+        ):
+            self.assertIn(label, body)
+        self.assertIn("unknown", body)
+
 
 if __name__ == "__main__":
     unittest.main()

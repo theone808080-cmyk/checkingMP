@@ -116,10 +116,15 @@ def render_source_review(conn) -> str:
 <p>Проверка: {html.escape(item['probe_status'])} {html.escape(item.get('probe_error') or '')}</p><p>{links}</p>
 <form><label>Название<input name="name" maxlength="200" required value="{html.escape(item['name'], quote=True)}"></label>
 <label>Адрес сбора<input name="collection_url" maxlength="2048" required value="{html.escape(item['collection_url'], quote=True)}"></label>
-<label>Тип<select name="kind">{options(('rss','html','telegram'), item['kind'])}</select></label>
+<label>Способ чтения<select name="kind">{options(('rss','html','telegram'), item['kind'])}</select></label>
 <label>Площадка<select name="category">{options(('ozon','wildberries','yandex','chestny_znak','industry'), item['category'])}</select></label>
 <label>Доверие<select name="trust">{options(('official','regulator','industry'), item['trust'])}</select></label>
 <label>Область<input name="scope" maxlength="300" required value="{html.escape(item['scope'], quote=True)}"></label>
+<label>Публичный доступ<select name="access_public">{options(('true','false','unknown'), 'true' if item.get('access_public') is True else 'false' if item.get('access_public') is False else 'unknown')}</select></label>
+<label>Учётные данные<select name="access_requires_credentials">{options(('false','true','unknown'), 'true' if item.get('access_requires_credentials') is True else 'false' if item.get('access_requires_credentials') is False else 'unknown')}</select></label>
+<label>Ограничение частоты<input name="access_rate_limit" maxlength="200" value="{html.escape(item.get('access_rate_limit') or '', quote=True)}"></label>
+<label>Стоимость доступа<select name="access_cost">{options(('free','paid','unknown'), item.get('access_cost') or 'unknown')}</select></label>
+<p>Последняя безопасная проверка: {html.escape(item.get('access_check_result') or 'unknown')}{' · ' + html.escape(item['access_checked_at'].isoformat()) if item.get('access_checked_at') else ''}</p>
 <button name="action" value="approve">Проверить и одобрить</button><button name="action" value="reject">Отклонить</button>
 <output aria-live="polite"></output></form></article>""")
     if not cards:
@@ -360,7 +365,8 @@ class Handler(BaseHTTPRequestHandler):
                 if (not isinstance(payload, dict) or set(payload) != {"action", "fields"}
                         or payload["action"] not in ("approve", "reject")
                         or not isinstance(payload["fields"], dict)
-                        or set(payload["fields"]) - {"name", "collection_url", "kind", "category", "trust", "scope"}):
+                        or set(payload["fields"]) - {"name", "collection_url", "kind", "category", "trust", "scope",
+                            "access_public", "access_requires_credentials", "access_rate_limit", "access_cost"}):
                     raise ValueError("invalid request schema")
                 candidate_id = int(match.group(1))
                 with db.connect() as conn:
@@ -371,6 +377,11 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 probe = None
                 fields = dict(payload["fields"])
+                for access_key in ("access_public", "access_requires_credentials"):
+                    if fields.get(access_key) in ("true", "false", "unknown"):
+                        fields[access_key] = {"true": True, "false": False, "unknown": None}[fields[access_key]]
+                if "access_rate_limit" in fields and fields["access_rate_limit"] == "":
+                    fields["access_rate_limit"] = None
                 if payload["action"] == "approve":
                     kind = fields.get("kind", candidate["kind"])
                     url = fields.get("collection_url", candidate["collection_url"])

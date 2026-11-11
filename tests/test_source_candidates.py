@@ -1,6 +1,8 @@
+import json
 import os
 import unittest
 import uuid
+from unittest.mock import patch
 
 import psycopg
 
@@ -50,6 +52,17 @@ class SourceCandidateStorageTests(unittest.TestCase):
         self.assertIn("source_candidates", tables)
         self.assertIn("source_provider_state", tables)
 
+    def test_schema_migrates_access_requirements_for_sources_and_candidates(self):
+        expected = {"access_public", "access_requires_credentials", "access_rate_limit",
+                    "access_cost", "access_checked_at", "access_check_result"}
+        for table in ("sources", "source_candidates"):
+            with self.subTest(table=table):
+                columns = {row[0] for row in self.conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema=%s AND table_name=%s",
+                    (self.schema, table),
+                ).fetchall()}
+                self.assertTrue(expected <= columns)
+
     def test_candidate_upsert_deduplicates_domain_and_merges_examples(self):
         created = db.upsert_source_candidates(self.conn, [self.candidate()])
         again = db.upsert_source_candidates(self.conn, [self.candidate(
@@ -70,17 +83,70 @@ class SourceCandidateStorageTests(unittest.TestCase):
         configured = db.sync_sources(self.conn)
         self.assertGreater(configured, 0)
         self.conn.execute(
-            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by)
+            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by,
+                                    access_public, access_requires_credentials, access_rate_limit, access_cost,
+                                    access_check_result)
                VALUES ('discovered_manual', 'Owner name', 'rss', 'https://owner.example/feed',
-                       'official', 'owner scope', 'ozon', true, 'owner')"""
+                       'official', 'owner scope', 'ozon', true, 'owner', true, false, '60/hour', 'free', 'passed')"""
         )
 
         db.sync_sources(self.conn)
 
         row = self.conn.execute(
-            "SELECT name, url, scope, category, managed_by FROM sources WHERE code='discovered_manual'"
+            """SELECT name, url, scope, category, managed_by, access_public, access_requires_credentials,
+                      access_rate_limit, access_cost, access_check_result
+               FROM sources WHERE code='discovered_manual'"""
         ).fetchone()
-        self.assertEqual(row, ("Owner name", "https://owner.example/feed", "owner scope", "ozon", "owner"))
+        self.assertEqual(row, ("Owner name", "https://owner.example/feed", "owner scope", "ozon", "owner",
+                               True, False, "60/hour", "free", "passed"))
+
+    def test_changed_config_url_requires_new_access_check_without_touching_owner_source(self):
+        class SourceConfig:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def read_text(self, encoding):
+                if encoding != "utf-8":
+                    raise AssertionError(f"unexpected encoding: {encoding}")
+                return json.dumps(self.payload)
+
+        initial = [{
+            "code": "config_url_change", "name": "Configured", "kind": "rss",
+            "url": "https://configured.example.org/original.xml", "trust": "official",
+            "scope": "configured scope", "category": "ozon",
+        }]
+        config = SourceConfig(initial)
+        with patch.object(db, "SOURCE_CONFIG", config):
+            db.sync_sources(self.conn)
+            self.conn.execute(
+                """UPDATE sources SET active=true, access_public=true, access_requires_credentials=false,
+                       access_rate_limit='60/hour', access_cost='free', access_checked_at=now(),
+                       access_check_result='passed' WHERE code='config_url_change'"""
+            )
+            self.conn.execute(
+                """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by,
+                                        access_public, access_requires_credentials, access_rate_limit, access_cost,
+                                        access_check_result)
+                   VALUES ('owner_unchanged', 'Owner', 'rss', 'https://owner.example.org/feed', 'official',
+                           'owner scope', 'ozon', true, 'owner', true, false, '30/hour', 'free', 'passed')"""
+            )
+            config.payload = [{**initial[0], "url": "https://configured.example.org/changed.xml"}]
+            db.sync_sources(self.conn)
+
+        config_row = self.conn.execute(
+            """SELECT url, active, access_public, access_requires_credentials, access_rate_limit, access_cost,
+                      access_checked_at, access_check_result FROM sources WHERE code='config_url_change'"""
+        ).fetchone()
+        self.assertEqual(config_row, ("https://configured.example.org/changed.xml", False, None, None, None,
+                                      "unknown", None, "unknown"))
+        pending = db.list_source_candidates(self.conn, status="pending")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["collection_url"], "https://configured.example.org/changed.xml")
+        owner_row = self.conn.execute(
+            """SELECT url, active, access_public, access_requires_credentials, access_rate_limit, access_cost,
+                      access_check_result FROM sources WHERE code='owner_unchanged'"""
+        ).fetchone()
+        self.assertEqual(owner_row, ("https://owner.example.org/feed", True, True, False, "30/hour", "free", "passed"))
 
     def test_exa_limit_pause_is_persisted(self):
         from datetime import datetime, timezone
@@ -117,14 +183,69 @@ class SourceCandidateStorageTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM sources WHERE code LIKE 'discovered_%'").fetchone()[0], 0)
         self.assertEqual(db.list_source_candidates(self.conn, status="all")[0]["probe_status"], "failed")
 
+    def test_paid_unknown_or_private_access_needs_manual_setup_and_never_activates_source(self):
+        for access in (
+            {"access_cost": "paid", "access_public": True, "access_requires_credentials": False},
+            {"access_cost": "unknown", "access_public": True, "access_requires_credentials": False},
+            {"access_cost": "free", "access_public": False, "access_requires_credentials": True},
+        ):
+            with self.subTest(access=access):
+                db.upsert_source_candidates(self.conn, [self.candidate(
+                    publisher_domain=f"{access['access_cost']}-{int(access['access_public'])}.example.org",
+                    collection_url=f"https://{access['access_cost']}-{int(access['access_public'])}.example.org/feed",
+                )])
+                candidate = db.list_source_candidates(self.conn, status="all")[0]
+                probe = {"ok": True, "kind": "html", "collection_url": candidate["collection_url"],
+                         "error": None, **access}
+                result = db.review_source_candidate(self.conn, candidate["id"], "approve", access, probe)
+                self.assertEqual(result["status"], "needs_setup")
+                self.assertIsNone(result["source_code"])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM sources WHERE managed_by='owner'").fetchone()[0], 0)
+
+    def test_free_public_source_records_safe_access_check_and_url_change_requires_new_check(self):
+        db.upsert_source_candidates(self.conn, [self.candidate(kind="rss")])
+        candidate = db.list_source_candidates(self.conn)[0]
+        access = {"access_public": True, "access_requires_credentials": False,
+                  "access_rate_limit": "60/hour", "access_cost": "free"}
+        approved = db.review_source_candidate(self.conn, candidate["id"], "approve", access, {
+            "ok": True, "kind": "rss", "collection_url": candidate["collection_url"], "error": None, **access,
+        })
+        self.assertEqual(approved["status"], "approved")
+        stored = db.list_source_candidates(self.conn, status="all")[0]
+        self.assertEqual({key: stored[key] for key in access}, access)
+        self.assertEqual(stored["access_check_result"], "passed")
+        self.assertIsNotNone(stored["access_checked_at"])
+        source = self.conn.execute(
+            "SELECT access_public, access_requires_credentials, access_rate_limit, access_cost, access_check_result "
+            "FROM sources WHERE code=%s", (approved["source_code"],),
+        ).fetchone()
+        self.assertEqual(source, (True, False, "60/hour", "free", "passed"))
+
+        changed_url = "https://changed.example.org/feed"
+        db.upsert_source_candidates(self.conn, [self.candidate(
+            publisher_domain="changed.example.org", collection_url="https://changed.example.org/original-feed",
+        )])
+        changed = db.list_source_candidates(self.conn, status="pending")[0]
+        stale_probe = {"ok": True, "kind": "html", "collection_url": "https://changed.example.org/original-feed",
+                       "error": None, **access}
+        result = db.review_source_candidate(self.conn, changed["id"], "approve", {
+            **access, "collection_url": changed_url,
+        }, stale_probe)
+        self.assertEqual(result, {"status": "needs_setup", "source_code": None})
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM sources WHERE managed_by='owner'").fetchone()[0], 1)
+
+
     def test_approval_uses_stable_code_and_manual_source_survives_sync(self):
         db.upsert_source_candidates(self.conn, [self.candidate()])
         row = db.list_source_candidates(self.conn)[0]
-        probe = {"ok": True, "kind": "rss", "collection_url": "https://feeds.example.net/seller.xml", "error": None}
+        access = {"access_public": True, "access_requires_credentials": False,
+                  "access_rate_limit": "60/hour", "access_cost": "free"}
+        probe = {"ok": True, "kind": "rss", "collection_url": "https://feeds.example.net/seller.xml", "error": None,
+                 **access}
 
         result = db.review_source_candidate(self.conn, row["id"], "approve", {
             "name": "Seller News Updated", "collection_url": "https://feeds.example.net/seller.xml",
-            "kind": "rss", "category": "ozon", "trust": "official", "scope": "ozon sellers",
+            "kind": "rss", "category": "ozon", "trust": "official", "scope": "ozon sellers", **access,
         }, probe)
         db.sync_sources(self.conn)
         source = self.conn.execute(

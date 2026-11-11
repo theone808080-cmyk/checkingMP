@@ -37,16 +37,45 @@ def init_schema(conn) -> None:
 
 def sync_sources(conn) -> int:
     sources = json.loads(SOURCE_CONFIG.read_text(encoding="utf-8"))
+    supports_access = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='sources'::regclass "
+        "AND attname='access_public' AND NOT attisdropped)"
+    ).fetchone()[0]
     for source in sources:
+        existing = conn.execute(
+            "SELECT url FROM sources WHERE code=%s AND managed_by='config'", (source["code"],),
+        ).fetchone()
+        changed_url = bool(existing and existing[0] != source["url"])
+        update_fields = (
+            "active = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN false ELSE sources.active END, "
+            "access_public = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN NULL ELSE sources.access_public END, "
+            "access_requires_credentials = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN NULL ELSE sources.access_requires_credentials END, "
+            "access_rate_limit = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN NULL ELSE sources.access_rate_limit END, "
+            "access_cost = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN 'unknown' ELSE sources.access_cost END, "
+            "access_checked_at = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN NULL ELSE sources.access_checked_at END, "
+            "access_check_result = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN 'unknown' ELSE sources.access_check_result END"
+            if supports_access else
+            "active = CASE WHEN sources.url IS DISTINCT FROM EXCLUDED.url THEN false ELSE sources.active END"
+        )
         conn.execute(
             """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by)
                VALUES (%(code)s, %(name)s, %(kind)s, %(url)s, %(trust)s, %(scope)s, %(category)s, true, 'config')
                ON CONFLICT (code) DO UPDATE SET
                  name = EXCLUDED.name, kind = EXCLUDED.kind, url = EXCLUDED.url,
-                 trust = EXCLUDED.trust, scope = EXCLUDED.scope, category = EXCLUDED.category
-               WHERE sources.managed_by = 'config'""",
+                 trust = EXCLUDED.trust, scope = EXCLUDED.scope, category = EXCLUDED.category, """ +
+            update_fields + " WHERE sources.managed_by = 'config'",
             source,
         )
+        if changed_url:
+            domain = _candidate_domain(urlparse(source["url"]).hostname or "")
+            conn.execute(
+                """INSERT INTO source_candidates
+                     (publisher_domain, collection_url, name, kind, category, trust, scope)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (publisher_domain, collection_url) DO NOTHING""",
+                (domain, source["url"], source["name"], source["kind"], source["category"],
+                 source["trust"], source["scope"]),
+            )
     return len(sources)
 
 
@@ -135,8 +164,9 @@ def upsert_source_candidates(conn, candidates: list[dict[str, Any]]) -> int:
         examples = _candidate_examples(candidate.get("example_urls", []))
         row = conn.execute(
             """INSERT INTO source_candidates
-                 (publisher_domain, collection_url, name, kind, category, trust, scope, examples)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                 (publisher_domain, collection_url, name, kind, category, trust, scope, examples,
+                  access_public, access_requires_credentials, access_rate_limit, access_cost)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                ON CONFLICT (publisher_domain, collection_url) DO UPDATE SET
                  name = CASE WHEN source_candidates.status IN ('pending', 'needs_setup') THEN EXCLUDED.name ELSE source_candidates.name END,
                  examples = (SELECT COALESCE(jsonb_agg(value ORDER BY first_ord), '[]'::jsonb)
@@ -150,7 +180,9 @@ def upsert_source_candidates(conn, candidates: list[dict[str, Any]]) -> int:
                  updated_at = now()
                RETURNING (xmax = 0) AS inserted""",
             (domain, collection_url, name.strip(), kind, category, trust, scope,
-             json.dumps(examples, ensure_ascii=False)),
+             json.dumps(examples, ensure_ascii=False), candidate.get("access_public"),
+             candidate.get("access_requires_credentials"), candidate.get("access_rate_limit"),
+             candidate.get("access_cost", "unknown")),
         ).fetchone()
         created += int(row[0])
     return created
@@ -165,12 +197,16 @@ def list_source_candidates(conn, status: str = "pending", limit: int = 200) -> l
     params = (limit,) if status == "all" else (status, limit)
     rows = conn.execute(
         f"""SELECT id, publisher_domain, collection_url, name, kind, category, trust, scope,
-                   status, probe_status, probe_error, examples, discovered_at, updated_at
+                   status, probe_status, probe_error, examples, discovered_at, updated_at,
+                   access_public, access_requires_credentials, access_rate_limit, access_cost,
+                   access_checked_at, access_check_result
             FROM source_candidates {condition} ORDER BY updated_at DESC, id DESC LIMIT %s""",
         params,
     ).fetchall()
     keys = ("id", "publisher_domain", "collection_url", "name", "kind", "category", "trust", "scope",
-            "status", "probe_status", "probe_error", "example_urls", "discovered_at", "updated_at")
+            "status", "probe_status", "probe_error", "example_urls", "discovered_at", "updated_at",
+            "access_public", "access_requires_credentials", "access_rate_limit", "access_cost",
+            "access_checked_at", "access_check_result")
     return [dict(zip(keys, row)) for row in rows]
 
 
@@ -196,16 +232,18 @@ def review_source_candidate(conn, candidate_id: int, action: str, fields: dict[s
                             probe: dict[str, Any] | None) -> dict[str, Any]:
     if type(candidate_id) is not int or candidate_id < 1 or action not in ("approve", "reject"):
         raise ValueError("invalid candidate action")
-    if not isinstance(fields, dict) or set(fields) - {"name", "collection_url", "kind", "category", "trust", "scope"}:
+    access_fields = {"access_public", "access_requires_credentials", "access_rate_limit", "access_cost"}
+    if not isinstance(fields, dict) or set(fields) - {"name", "collection_url", "kind", "category", "trust", "scope"} - access_fields:
         raise ValueError("invalid candidate fields")
     with conn.transaction():
         row = conn.execute(
-            """SELECT publisher_domain, collection_url, name, kind, category, trust, scope, status
+            """SELECT publisher_domain, collection_url, name, kind, category, trust, scope, status,
+                      access_public, access_requires_credentials, access_rate_limit, access_cost
                FROM source_candidates WHERE id = %s FOR UPDATE""", (candidate_id,),
         ).fetchone()
         if row is None:
             raise ValueError("candidate not found")
-        domain, old_url, old_name, old_kind, old_category, old_trust, old_scope, status = row
+        domain, old_url, old_name, old_kind, old_category, old_trust, old_scope, status, old_public, old_credentials, old_rate_limit, old_cost = row
         if status in ("approved", "rejected"):
             raise ValueError("candidate already reviewed")
         name = fields.get("name", old_name)
@@ -224,6 +262,16 @@ def review_source_candidate(conn, candidate_id: int, action: str, fields: dict[s
         if not isinstance(scope, str) or not scope.strip() or len(scope.strip()) > 300:
             raise ValueError("invalid candidate scope")
         collection_url = _candidate_collection_url(fields.get("collection_url", old_url), domain)
+        access_public = fields.get("access_public", old_public)
+        access_credentials = fields.get("access_requires_credentials", old_credentials)
+        access_rate_limit = fields.get("access_rate_limit", old_rate_limit)
+        access_cost = fields.get("access_cost", old_cost or "unknown")
+        if access_public not in (True, False, None) or access_credentials not in (True, False, None):
+            raise ValueError("invalid source access visibility")
+        if access_rate_limit is not None and (not isinstance(access_rate_limit, str) or len(access_rate_limit) > 200):
+            raise ValueError("invalid source rate limit")
+        if access_cost not in ("free", "paid", "unknown"):
+            raise ValueError("invalid source access cost")
         if action == "reject":
             conn.execute(
                 """UPDATE source_candidates SET name=%s, collection_url=%s, kind=%s, category=%s,
@@ -241,27 +289,50 @@ def review_source_candidate(conn, candidate_id: int, action: str, fields: dict[s
         if not probe_ok:
             conn.execute(
                 """UPDATE source_candidates SET name=%s, collection_url=%s, kind=%s, category=%s,
-                     trust=%s, scope=%s, status='needs_setup', probe_status='failed', probe_error=%s,
+                     trust=%s, scope=%s, access_public=%s, access_requires_credentials=%s, access_rate_limit=%s,
+                     access_cost=%s, access_checked_at=now(), access_check_result='failed',
+                     status='needs_setup', probe_status='failed', probe_error=%s,
                      updated_at=now() WHERE id=%s""",
-                (name.strip(), collection_url, kind, category, trust, scope.strip(), safe_probe_error, candidate_id),
+                (name.strip(), collection_url, kind, category, trust, scope.strip(), access_public,
+                 access_credentials, access_rate_limit, access_cost, safe_probe_error, candidate_id),
+            )
+            return {"status": "needs_setup", "source_code": None}
+        access_ok = access_public is True and access_credentials is False and access_cost == "free"
+        if not access_ok:
+            conn.execute(
+                """UPDATE source_candidates SET name=%s, collection_url=%s, kind=%s, category=%s, trust=%s,
+                     scope=%s, access_public=%s, access_requires_credentials=%s, access_rate_limit=%s, access_cost=%s,
+                     access_checked_at=now(), access_check_result='passed', probe_status='passed', probe_error=NULL,
+                     status='needs_setup', updated_at=now() WHERE id=%s""",
+                (name.strip(), collection_url, kind, category, trust, scope.strip(), access_public,
+                 access_credentials, access_rate_limit, access_cost, candidate_id),
             )
             return {"status": "needs_setup", "source_code": None}
         code_hash = hashlib.sha256(f"{domain}|{collection_url}".encode("utf-8")).hexdigest()[:24]
         source_code = "discovered_" + code_hash
         conn.execute(
-            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, true, 'owner')
+            """INSERT INTO sources (code, name, kind, url, trust, scope, category, active, managed_by,
+                                    access_public, access_requires_credentials, access_rate_limit, access_cost,
+                                    access_checked_at, access_check_result)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, true, 'owner', %s, %s, %s, %s, now(), 'passed')
                ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind,
                  url=EXCLUDED.url, trust=EXCLUDED.trust, scope=EXCLUDED.scope,
-                 category=EXCLUDED.category, active=true
+                 category=EXCLUDED.category, active=true, access_public=EXCLUDED.access_public,
+                 access_requires_credentials=EXCLUDED.access_requires_credentials,
+                 access_rate_limit=EXCLUDED.access_rate_limit, access_cost=EXCLUDED.access_cost,
+                 access_checked_at=now(), access_check_result='passed'
                WHERE sources.managed_by='owner'""",
-            (source_code, name.strip(), kind, collection_url, trust, scope.strip(), category),
+            (source_code, name.strip(), kind, collection_url, trust, scope.strip(), category,
+             access_public, access_credentials, access_rate_limit, access_cost),
         )
         conn.execute(
             """UPDATE source_candidates SET name=%s, collection_url=%s, kind=%s, category=%s,
-                 trust=%s, scope=%s, status='approved', probe_status='passed', probe_error=NULL,
+                 trust=%s, scope=%s, access_public=%s, access_requires_credentials=%s, access_rate_limit=%s,
+                 access_cost=%s, access_checked_at=now(), access_check_result='passed',
+                 status='approved', probe_status='passed', probe_error=NULL,
                  updated_at=now() WHERE id=%s""",
-            (name.strip(), collection_url, kind, category, trust, scope.strip(), candidate_id),
+            (name.strip(), collection_url, kind, category, trust, scope.strip(), access_public,
+             access_credentials, access_rate_limit, access_cost, candidate_id),
         )
         return {"status": "approved", "source_code": source_code}
 
