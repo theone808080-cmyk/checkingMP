@@ -6,6 +6,8 @@
 
 Задачи 1–10 объединены и отправлены в `main` форка `theone808080-cmyk/checkingMP`. Коммит `a2cd409` успешно развёрнут в Coolify 2026-11-11: образ собран, проверка `/health` прошла. Полный набор из 193 тестов дал 190 успешных результатов; 3 Docker smoke-теста пропущены локально, поскольку Docker CLI отсутствует. Расписания резервного копирования и поиска новых источников ещё не настроены.
 
+Задача 11 реализована в ветке `feat/task-11-openrouter-diagnostics`: отказ обработки ответа OpenRouter теперь записывает безопасную категорию и этап в stderr, не включая запрос, материалы, ответ или секреты; модельное поле сериализуется так, чтобы Unicode-разделители не нарушали формат одной строки. Полный набор: 202 теста, 199 прошли, 3 Docker smoke-теста пропущены из-за отсутствия Docker CLI.
+
 
 
 ## Состав проекта
@@ -15,8 +17,12 @@
 | `AGENTS.md` | Основные правила проекта и процесс spec-driven development для Codex/Cursor |
 | `README.md` | Навигация, настройка, запуск и развёртывание |
 | `progress.md` | Вехи, подтверждённое состояние и следующий шаг |
+| `kanban.md` | Очередь согласуемых функций и их статус в SDD-процессе |
 | `SPEC.md` | Утверждённые задачи проекта, включая резервное копирование и сторожа |
 | [`docs/data-flow.md`](docs/data-flow.md) | Редактируемая схема потока данных, статусов компонентов и ручной проверки |
+| [`docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/spec.md`](docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/spec.md) | Утверждённая задача 11: безопасная диагностика невалидного ответа OpenRouter |
+| [`docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/plan.md`](docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/plan.md) | План реализации утверждённой задачи 11 |
+| [`docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/tasks.md`](docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/tasks.md) | Чек-лист выполнения и проверки задачи 11 |
 | `docs/superpowers/plans/2026-11-09-russian-translations.md` | План реализации задачи 2 |
 | `main.py` | Командный интерфейс цикла, ручной проверки, веб-сервера и уведомлений |
 | `config/` | Реестр источников и пример JSON для ручного импорта |

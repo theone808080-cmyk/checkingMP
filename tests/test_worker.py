@@ -1,7 +1,7 @@
 import io
 import json
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from unittest.mock import patch
 
 import main as cli
@@ -9,7 +9,7 @@ from worker import main as worker
 
 
 class Response(io.BytesIO):
-    pass
+    status = 200
 
 
 class Connection:
@@ -45,6 +45,10 @@ SIGNAL = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "importance
 
 def response(content):
     return Response(json.dumps({"choices": [{"message": {"content": content}}]}).encode())
+
+
+def envelope(value):
+    return Response(json.dumps(value).encode())
 
 
 class WorkerTests(unittest.TestCase):
@@ -121,11 +125,126 @@ class WorkerTests(unittest.TestCase):
         body = json.loads(request.data)
         self.assertEqual(request.full_url, "https://openrouter.ai/api/v1/chat/completions")
         self.assertIn("Translate non-Russian content into Russian", body["messages"][0]["content"])
+
+    def rejected_diagnostic(self, response_value, *, cycle_id=77, batch=BATCH, env=None):
+        stderr = io.StringIO()
+        with patch.dict(worker.os.environ, env or {}, clear=False), \
+             patch.object(worker, "open_url", return_value=response_value), redirect_stderr(stderr):
+            with self.assertRaisesRegex(RuntimeError, "OpenRouter response invalid; queue unchanged"):
+                worker.infer(batch, cycle_id=cycle_id)
+        lines = [line for line in stderr.getvalue().splitlines() if line]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("openrouter_diagnostic "))
+        return json.loads(lines[0].removeprefix("openrouter_diagnostic ")), stderr.getvalue()
+
+    def test_infer_invalid_envelope_json_logs_safe_category(self):
+        diagnostic, output = self.rejected_diagnostic(Response(b'{"broken":'))
+        self.assertEqual(diagnostic["stage"], "envelope")
+        self.assertEqual(diagnostic["reason"], "invalid_envelope_json")
+        self.assertEqual(diagnostic["event"], "openrouter_response_rejected")
+        self.assertNotIn('{"broken":', output)
+
+    def test_infer_invalid_envelope_shape_logs_safe_category(self):
+        diagnostic, _ = self.rejected_diagnostic(envelope({"choices": []}))
+        self.assertEqual(diagnostic["stage"], "envelope")
+        self.assertEqual(diagnostic["reason"], "invalid_envelope_shape")
+
+    def test_infer_missing_or_invalid_content_logs_safe_category(self):
+        cases = (
+            ({"choices": [{"message": {}}]}, "missing_content"),
+            ({"choices": [{"message": {"content": {}}}]}, "content_not_text"),
+        )
+        for value, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                diagnostic, _ = self.rejected_diagnostic(envelope(value))
+                self.assertEqual(diagnostic["stage"], "content")
+                self.assertEqual(diagnostic["reason"], expected_reason)
+
+    def test_infer_invalid_completion_json_logs_safe_category(self):
+        diagnostic, output = self.rejected_diagnostic(response('{"completion_canary":'))
+        self.assertEqual(diagnostic["stage"], "content")
+        self.assertEqual(diagnostic["reason"], "invalid_completion_json")
+        self.assertNotIn("completion_canary", output)
+
+    def test_infer_schema_failure_logs_allowlisted_reason(self):
+        cases = (
+            ({"signals": [], "skipped_material_ids": []}, "schema_required_fields"),
+            ({"signals": [{**SIGNAL, "summary": ""}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_signal_fields"),
+            ({"signals": [{**SIGNAL, "importance": 6}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_importance"),
+            ({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_material_ids"),
+            ({"signals": [SIGNAL], "skipped_material_ids": [1], "translations": TRANSLATIONS}, "schema_material_ids"),
+            ({"signals": [SIGNAL], "skipped_material_ids": [2], "translations": [TRANSLATIONS[0]]}, "schema_translation"),
+        )
+        for payload, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                diagnostic, _ = self.rejected_diagnostic(response(json.dumps(payload)))
+                self.assertEqual(diagnostic["stage"], "schema")
+                self.assertEqual(diagnostic["reason"], expected_reason)
+                self.assertIn(diagnostic["reason"], {
+                    "schema_required_fields", "schema_signal_fields", "schema_importance",
+                    "schema_material_ids", "schema_translation",
+                })
+
+    def test_infer_diagnostic_includes_safe_context_only(self):
+        secret = "task11-api-secret-canary"
+        material = "task11-material-canary"
+        sensitive_batch = [{**item, "title": material, "text": material} for item in BATCH]
+        diagnostic, output = self.rejected_diagnostic(
+            response('{"model_response_canary":"' + secret), batch=sensitive_batch,
+            env={"OPENROUTER_API_KEY": secret},
+        )
+        self.assertEqual(diagnostic, {
+            "event": "openrouter_response_rejected",
+            "stage": "content",
+            "reason": "invalid_completion_json",
+            "cycle_id": 77,
+            "model": "test",
+            "batch_size": 2,
+            "http_status": 200,
+        })
+        for canary in (secret, material, "model_response_canary", "Bearer"):
+            self.assertNotIn(canary, output)
+
+    def test_infer_diagnostic_escapes_unicode_line_separators_in_model(self):
+        model = "task11-model\u2028separator\u2029separator"
+        diagnostic, output = self.rejected_diagnostic(
+            Response(b'{"broken":'), env={"OPENROUTER_MODEL": model},
+        )
+        self.assertEqual(len(output.splitlines()), 1)
+        self.assertNotIn("\u2028", output)
+        self.assertNotIn("\u2029", output)
+        self.assertEqual(diagnostic["model"], model)
+
+    def test_infer_request_construction_failure_is_safe_not_schema_diagnostic(self):
+        cases = (
+            ("request", "task11-request-canary"),
+            ("open_url", "task11-open-url-canary"),
+        )
+        for stage, canary in cases:
+            with self.subTest(stage=stage):
+                stderr = io.StringIO()
+                failure = ValueError(canary)
+                patch_target = worker.urllib.request if stage == "request" else worker
+                patch_name = "Request" if stage == "request" else "open_url"
+                with patch.object(patch_target, patch_name, side_effect=failure), redirect_stderr(stderr):
+                    with self.assertRaisesRegex(RuntimeError, "OpenRouter request invalid; queue unchanged") as caught:
+                        worker.infer(BATCH, cycle_id=77)
+                self.assertNotIn(canary, str(caught.exception))
+                self.assertNotIn(canary, stderr.getvalue())
+                self.assertNotIn("schema", stderr.getvalue())
+                self.assertNotIn("openrouter_diagnostic", stderr.getvalue())
+
+    def test_process_passes_cycle_id_to_infer(self):
+        payload = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        with patch.object(worker, "infer", return_value=payload) as infer:
+            self.assertEqual(worker.process(self.conn, cycle_id=123), (1, 1, 1))
+        infer.assert_called_once_with(BATCH, cycle_id=123)
+
     def test_shadow_filter_runs_before_model_processing(self):
         calls = []
         payload = {"signals": [{**SIGNAL, "material_ids": [1]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}
         with patch.object(worker, "assess_pending", create=True, side_effect=lambda _conn: calls.append("filter")), \
-             patch.object(worker, "infer", side_effect=lambda _batch: calls.append("model") or payload):
+             patch.object(worker, "infer", side_effect=lambda _batch, **_kwargs: calls.append("model") or payload):
             result = worker.process(self.conn)
 
         self.assertEqual(result, (1, 1, 1))

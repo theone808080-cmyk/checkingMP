@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -15,6 +16,14 @@ from judge.main import assess_pending
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+class ResponseValidationError(ValueError):
+    """A model payload failed validation with a safe, fixed reason code."""
+
+    def __init__(self, reason_code):
+        self.reason_code = reason_code
+        super().__init__("Invalid OpenRouter response")
 
 
 def open_url(request, timeout):
@@ -47,35 +56,66 @@ def strict_loads(value):
     return json.loads(value, parse_constant=reject_constant, object_pairs_hook=unique)
 
 
+def log_response_rejection(*, stage, reason, cycle_id, model, batch_size, http_status):
+    safe_model = model[:120] if isinstance(model, str) and all(ord(char) >= 32 for char in model) else "unknown"
+    event = {
+        "event": "openrouter_response_rejected",
+        "stage": stage,
+        "reason": reason,
+        "model": safe_model,
+        "batch_size": batch_size,
+        "http_status": http_status,
+    }
+    if type(cycle_id) is int:
+        event["cycle_id"] = cycle_id
+    print("openrouter_diagnostic " + json.dumps(event, ensure_ascii=True, sort_keys=True), file=sys.stderr)
+
+
+def rejected_response(*, stage, reason, cycle_id, model, batch_size, http_status):
+    log_response_rejection(
+        stage=stage, reason=reason, cycle_id=cycle_id, model=model,
+        batch_size=batch_size, http_status=http_status,
+    )
+    failure = RuntimeError("OpenRouter response invalid; queue unchanged")
+    failure.failure_signature = "invalid_response"
+    raise failure from None
+
+
 def validate(payload, batch):
     if (not isinstance(payload, dict) or not isinstance(payload.get("signals"), list) or
             not isinstance(payload.get("skipped_material_ids"), list) or not isinstance(payload.get("translations"), list)):
-        raise ValueError("Expected signals, skipped_material_ids, and translations arrays")
+        raise ResponseValidationError("schema_required_fields")
     allowed = {item["material_id"] for item in batch}
     used = set()
     normalized_signals = []
     def ids(values):
         if not isinstance(values, list) or any(type(value) is not int or value not in allowed or value in used for value in values) or len(values) != len(set(values)):
-            raise ValueError("Material IDs must be unique members of the current batch")
+            raise ResponseValidationError("schema_material_ids")
         used.update(values)
     for signal in payload["signals"]:
         if not isinstance(signal, dict):
-            raise ValueError("Signal must be an object")
+            raise ResponseValidationError("schema_signal_fields")
         for field in ("platform", "topic", "summary", "recommended_action"):
             if not isinstance(signal.get(field), str) or not signal[field].strip():
-                raise ValueError(f"Signal requires non-empty text: {field}")
+                raise ResponseValidationError("schema_signal_fields")
         if type(signal.get("importance")) is not int or not 1 <= signal["importance"] <= 5:
-            raise ValueError("Invalid importance")
-        platform = db.normalize_event_platform(signal["platform"])
+            raise ResponseValidationError("schema_importance")
+        try:
+            platform = db.normalize_event_platform(signal["platform"])
+        except (ValueError, TypeError):
+            raise ResponseValidationError("schema_signal_fields") from None
         if "event_key" in signal and (not isinstance(signal["event_key"], str) or not signal["event_key"].strip()):
-            raise ValueError("Invalid event_key")
+            raise ResponseValidationError("schema_signal_fields")
         if signal.get("effective_date") is not None:
             if not isinstance(signal["effective_date"], str):
-                raise ValueError("Invalid effective_date")
-            date.fromisoformat(signal["effective_date"])
+                raise ResponseValidationError("schema_signal_fields")
+            try:
+                date.fromisoformat(signal["effective_date"])
+            except ValueError:
+                raise ResponseValidationError("schema_signal_fields") from None
         values = signal.get("material_ids")
         if not values:
-            raise ValueError("Signal requires material IDs")
+            raise ResponseValidationError("schema_material_ids")
         ids(values)
         normalized_signals.append({**signal, "platform": platform})
     ids(payload["skipped_material_ids"])
@@ -95,17 +135,17 @@ def validate_translations(translations, batch):
                 not isinstance(translation.get("title_ru"), str) or not translation["title_ru"].strip() or
                 not isinstance(translation.get("text_ru"), str) or
                 len(translation["text_ru"]) > 400):
-            raise ValueError("Invalid material translation")
+            raise ResponseValidationError("schema_translation")
         material_id = translation["material_id"]
         if material_id in translated_ids or material_id not in expected_translation_ids:
-            raise ValueError("Translation IDs must uniquely match pending materials")
+            raise ResponseValidationError("schema_translation")
         material = next(item for item in batch if item["material_id"] == material_id)
         if (material.get("text") or "")[:400].strip() and not translation["text_ru"].strip():
-            raise ValueError("Translation text is required for a non-empty excerpt")
+            raise ResponseValidationError("schema_translation")
         translated_ids.add(material_id)
         translated.append(translation)
     if translated_ids != expected_translation_ids:
-        raise ValueError("Every pending material requires a translation")
+        raise ResponseValidationError("schema_translation")
     return translated
 
 
@@ -122,7 +162,7 @@ def probe():
         return {"available": False, "error": "OpenRouter probe failed; check settings and connectivity"}
 
 
-def infer(batch):
+def infer(batch, *, cycle_id=None):
     base, key, model, timeout, _, max_tokens = settings()
     prompt = ("Analyze the supplied public materials. Return only a JSON object with arrays signals, skipped_material_ids, and translations. "
               "Each signal requires material_ids, platform, topic, importance (integer 1-5, where 5 is highest), summary, "
@@ -137,12 +177,7 @@ def infer(batch):
     body = json.dumps({"model": model, "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(batch, ensure_ascii=False, default=lambda x: x.isoformat() if isinstance(x, (date, datetime)) else str(x))}], "temperature": 0, "max_tokens": max_tokens, "response_format": {"type": "json_object"}}, ensure_ascii=False).encode("utf-8")
     try:
         request = urllib.request.Request(base + "/chat/completions", data=body, headers={"Content-Type": "application/json", "Authorization": "Bearer " + key}, method="POST")
-        with open_url(request, timeout=timeout) as response:
-            envelope = strict_loads(response.read().decode("utf-8"))
-        content = envelope["choices"][0]["message"]["content"]
-        if not isinstance(content, str):
-            raise ValueError("Completion content must be text")
-        payload = validate(strict_loads(content), batch)
+        response_context = open_url(request, timeout=timeout)
     except urllib.error.HTTPError as error:
         failure = RuntimeError("OpenRouter request rejected; queue unchanged")
         failure.failure_signature = f"http_{error.code}"
@@ -151,9 +186,56 @@ def infer(batch):
         failure = RuntimeError("OpenRouter transport failed; queue unchanged")
         failure.failure_signature = "transport"
         raise failure from None
-    except (ValueError, UnicodeError, KeyError, IndexError, TypeError):
-        failure = RuntimeError("OpenRouter response invalid; queue unchanged")
-        failure.failure_signature = "invalid_response"
+    except (ValueError, TypeError):
+        failure = RuntimeError("OpenRouter request invalid; queue unchanged")
+        failure.failure_signature = "request_invalid"
+        raise failure from None
+
+    http_status = None
+    try:
+        with response_context as response:
+            http_status = getattr(response, "status", None)
+            if type(http_status) is not int:
+                try:
+                    http_status = response.getcode()
+                except (AttributeError, OSError):
+                    http_status = None
+            if type(http_status) is not int or not 100 <= http_status <= 599:
+                http_status = None
+            try:
+                envelope = strict_loads(response.read().decode("utf-8"))
+            except (ValueError, UnicodeError):
+                rejected_response(stage="envelope", reason="invalid_envelope_json", cycle_id=cycle_id,
+                                 model=model, batch_size=len(batch), http_status=http_status)
+            if (not isinstance(envelope, dict) or not isinstance(envelope.get("choices"), list) or
+                    not envelope["choices"] or not isinstance(envelope["choices"][0], dict) or
+                    not isinstance(envelope["choices"][0].get("message"), dict)):
+                rejected_response(stage="envelope", reason="invalid_envelope_shape", cycle_id=cycle_id,
+                                 model=model, batch_size=len(batch), http_status=http_status)
+            message = envelope["choices"][0]["message"]
+            if "content" not in message or message["content"] is None:
+                rejected_response(stage="content", reason="missing_content", cycle_id=cycle_id,
+                                 model=model, batch_size=len(batch), http_status=http_status)
+            content = message["content"]
+            if not isinstance(content, str):
+                rejected_response(stage="content", reason="content_not_text", cycle_id=cycle_id,
+                                 model=model, batch_size=len(batch), http_status=http_status)
+            try:
+                decoded = strict_loads(content)
+            except (ValueError, UnicodeError):
+                rejected_response(stage="content", reason="invalid_completion_json", cycle_id=cycle_id,
+                                 model=model, batch_size=len(batch), http_status=http_status)
+            try:
+                payload = validate(decoded, batch)
+            except ResponseValidationError as error:
+                rejected_response(stage="schema", reason=error.reason_code, cycle_id=cycle_id,
+                                 model=model, batch_size=len(batch), http_status=http_status)
+            except (ValueError, UnicodeError, KeyError, IndexError, TypeError):
+                rejected_response(stage="schema", reason="schema_signal_fields", cycle_id=cycle_id,
+                                 model=model, batch_size=len(batch), http_status=http_status)
+    except OSError:
+        failure = RuntimeError("OpenRouter transport failed; queue unchanged")
+        failure.failure_signature = "transport"
         raise failure from None
     return payload
 
@@ -221,7 +303,7 @@ def process(conn, *, cycle_id: int | None = None):
     analysis_started = datetime.now().astimezone()
     model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4.1-nano")[:120]
     try:
-        payload = validate(infer(batch), batch)
+        payload = validate(infer(batch, cycle_id=cycle_id), batch)
     except Exception:
         analysis_finished = datetime.now().astimezone()
         for item in batch:
