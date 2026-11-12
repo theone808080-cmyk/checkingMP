@@ -87,6 +87,45 @@ class FeedPostgresTests(unittest.TestCase):
         self.assertEqual(item.get("title_ru"), "Новое правило")
         self.assertEqual(item.get("text_ru"), "Поставщик должен обновить маркировку.")
 
+    def test_pending_translation_is_excluded_from_total_pages_and_cursor_until_ready(self):
+        timestamp = datetime.now(timezone.utc)
+        self.add("ozon_telegram", "ready-first", timestamp, timestamp)
+        self.add("ozon_telegram", "ready-second", timestamp - timedelta(minutes=1), timestamp)
+        self.add("ozon_telegram", "pending-newest", timestamp + timedelta(minutes=1), timestamp)
+        self.conn.execute("UPDATE materials SET translation_status='ready' WHERE title LIKE 'ready-%'")
+        self.conn.execute("UPDATE materials SET translation_status='pending' WHERE title='pending-newest'")
+
+        first = db.feed_materials(self.conn, limit=1)
+        self.assertEqual([item["title"] for item in first["materials"]], ["ready-first"])
+        self.assertEqual(first["total"], 2)
+        self.assertIsNotNone(first["next_cursor"])
+
+        second = db.feed_materials(self.conn, cursor=first["next_cursor"], limit=1)
+        self.assertEqual([item["title"] for item in second["materials"]], ["ready-second"])
+        self.assertEqual(second["total"], 2)
+        self.assertIsNone(second["next_cursor"])
+
+        self.conn.execute("UPDATE materials SET translation_status='ready' WHERE title='pending-newest'")
+        visible_after_ready = db.feed_materials(self.conn, limit=3)
+        self.assertEqual([item["title"] for item in visible_after_ready["materials"]],
+                         ["pending-newest", "ready-first", "ready-second"])
+        self.assertEqual(visible_after_ready["total"], 3)
+
+    def test_cursor_snapshot_rechecks_pending_translation_after_snapshot_creation(self):
+        timestamp = datetime.now(timezone.utc)
+        self.add("ozon_telegram", "visible-first", timestamp, timestamp)
+        self.add("ozon_telegram", "visible-second", timestamp - timedelta(minutes=1), timestamp)
+        first = db.feed_materials(self.conn, limit=1)
+        self.assertEqual([item["title"] for item in first["materials"]], ["visible-first"])
+        self.assertEqual(first["total"], 2)
+        self.assertIsNotNone(first["next_cursor"])
+
+        self.conn.execute("UPDATE materials SET translation_status='pending' WHERE title='visible-second'")
+        second = db.feed_materials(self.conn, cursor=first["next_cursor"], limit=1)
+        self.assertEqual(second["materials"], [])
+        self.assertEqual(second["total"], 1)
+        self.assertIsNone(second["next_cursor"])
+
     def test_stable_cursor_does_not_repeat_ties_or_newer_inserts(self):
         timestamp = datetime.now(timezone.utc) - timedelta(hours=1)
         for title in ("one", "two", "three"):
