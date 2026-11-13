@@ -46,7 +46,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function collect(node) { return [node, ...(node.children || []).flatMap(collect)]; }
 (async () => {
   await tick();
-  await el('nav-findings').handlers.click();
+  await tick();
   await tick();
   assert.ok(requests.some(url => url.startsWith('/api/findings?')));
   const countsRequest = requests.find(url => url.startsWith('/api/findings/counts?'));

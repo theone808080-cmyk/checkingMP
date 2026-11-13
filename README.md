@@ -8,6 +8,8 @@
 
 Задача 11 реализована в ветке `feat/task-11-openrouter-diagnostics`: отказ обработки ответа OpenRouter теперь записывает безопасную категорию и этап в stderr, не включая запрос, материалы, ответ или секреты; модельное поле сериализуется так, чтобы Unicode-разделители не нарушали формат одной строки. Полный набор: 202 теста, 199 прошли, 3 Docker smoke-теста пропущены из-за отсутствия Docker CLI.
 
+Задача 12 реализована в ветке `feat/task-12-feed-reading`: Mini App открывает раздел находок, показывает основные фильтры и прячет дополнительные за раскрываемой панелью, а карточки позволяют раскрыть полную сводку, действие и источники. Материалы в ожидании перевода исключаются из исходной ленты, включая страницы уже созданного снимка. Независимый полный набор: 204 теста, 201 прошёл, 3 Docker smoke-теста пропущены; push и развёртывание не выполнялись.
+
 
 
 ## Состав проекта
@@ -23,6 +25,9 @@
 | [`docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/spec.md`](docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/spec.md) | Утверждённая задача 11: безопасная диагностика невалидного ответа OpenRouter |
 | [`docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/plan.md`](docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/plan.md) | План реализации утверждённой задачи 11 |
 | [`docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/tasks.md`](docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/tasks.md) | Чек-лист выполнения и проверки задачи 11 |
+| [`docs/superpowers/specs/2026-11-12-readable-feed-findings/spec.md`](docs/superpowers/specs/2026-11-12-readable-feed-findings/spec.md) | Утверждённая задача 12: компактная лента и раскрываемые подробности находок |
+| [`docs/superpowers/specs/2026-11-12-readable-feed-findings/plan.md`](docs/superpowers/specs/2026-11-12-readable-feed-findings/plan.md) | План реализации задачи 12 |
+| [`docs/superpowers/specs/2026-11-12-readable-feed-findings/tasks.md`](docs/superpowers/specs/2026-11-12-readable-feed-findings/tasks.md) | Чек-лист выполнения и проверки задачи 12 |
 | `docs/superpowers/plans/2026-11-09-russian-translations.md` | План реализации задачи 2 |
 | `main.py` | Командный интерфейс цикла, ручной проверки, веб-сервера и уведомлений |
 | `config/` | Реестр источников и пример JSON для ручного импорта |

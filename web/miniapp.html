@@ -9,14 +9,16 @@
     :root { color-scheme: light dark; --bg:#f4f6f7; --fg:#17232a; --muted:#63717a; --card:#fff; --line:#dce3e7; --accent:#147d7a; --button-text:#fff; }
     @media (prefers-color-scheme: dark) { :root { --bg:#121a1e; --fg:#edf3f4; --muted:#a6b6bc; --card:#1c282e; --line:#37494f; --accent:#65cbc2; --button-text:#102322; } }
     * { box-sizing:border-box; } body { margin:0; font:16px/1.5 system-ui,sans-serif; color:var(--fg); background:var(--bg); }
-    .wrap { max-width:740px; margin:auto; padding:24px 16px 100px; } header { margin:4px 0 24px; } .eyebrow { color:var(--accent); font-size:12px; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
+    .wrap { max-width:740px; margin:auto; padding:18px 14px 100px; } header { margin:4px 0 18px; } .eyebrow { color:var(--accent); font-size:12px; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
     h1 { font-size:clamp(25px,6vw,36px); line-height:1.14; margin:8px 0; letter-spacing:-.035em; } h2 { font-size:22px; } p { margin:8px 0; } .muted { color:var(--muted); }
     .filters { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:20px 0; } .filter-group { min-width:0; margin:0; padding:12px; border:1px solid var(--line); border-radius:10px; } .filter-group legend { padding:0 5px; color:var(--accent); font-size:14px; font-weight:700; } label { display:grid; gap:5px; color:var(--muted); font-size:13px; font-weight:600; }
     select,button { font:inherit; } select { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
-    .card, .source, .about { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin:10px 0; overflow-wrap:anywhere; }
-    .meta { color:var(--muted); font-size:13px; } .card h3 { font-size:18px; line-height:1.3; margin:9px 0; } .card p { white-space:pre-line; } a { color:var(--accent); font-weight:650; } .card a { display:inline-block; margin-top:10px; }
+    .card, .source, .about { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:8px 0; overflow-wrap:anywhere; }
+    .meta { color:var(--muted); font-size:12px; } .card h3 { font-size:16px; line-height:1.35; margin:6px 0; } .card p { white-space:pre-line; } a { color:var(--accent); font-weight:650; } .card a { display:inline-block; margin-top:8px; }
     input { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
     .finding-level { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; } .importance-square { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border:1px solid #59656b55; border-radius:5px; color:#142027; }
+    .finding-card { padding:10px 12px; } .finding-card summary { cursor:pointer; } .finding-card summary:focus-visible, .extra-filters summary:focus-visible { outline:3px solid var(--accent); outline-offset:2px; } .finding-card .finding-level { margin-bottom:3px; } .finding-card .importance-square { width:24px; height:24px; } .finding-card h3 { margin:4px 0; font-size:16px; line-height:1.32; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .extra-filters { margin:10px 0 6px; } .extra-filters > summary { display:inline-block; cursor:pointer; color:var(--accent); font-weight:700; padding:6px 0; } .finding-filter-groups { margin:8px 0; } .finding-active-filters { display:flex; flex-wrap:wrap; gap:6px; } .active-filter { max-width:100%; overflow-wrap:anywhere; border-radius:999px; padding:3px 8px; background:var(--card); color:var(--muted); border:1px solid var(--line); font-size:12px; }
     .importance-1 { background:#b9c1c7; } .importance-2 { background:#79b9e7; } .importance-3 { background:#f4d35e; } .importance-4 { background:#f4a261; } .importance-5 { background:#ef6c68; }
     .finding-sources { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:8px; } .topic-options { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 8px; } .topic-chip { border:1px solid var(--line); border-radius:999px; padding:5px 9px; color:var(--fg); background:var(--card); font-size:13px; cursor:pointer; } .topic-chip[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
     .actions { text-align:center; margin:20px 0; } .more { background:var(--accent); color:var(--button-text); border:0; border-radius:10px; padding:11px 20px; font-weight:700; cursor:pointer; }
@@ -29,7 +31,7 @@
 <body>
 <main class="wrap">
   <header><div class="eyebrow">Радар • Маркетплейсы</div><h1>Новости и изменения</h1><p class="muted">Материалы площадок, отрасли и «Честного знака»</p></header>
-  <section id="feed" aria-label="Лента">
+  <section id="feed" aria-label="Лента" hidden>
     <div class="filters">
       <label>Период<select id="period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label>
       <label>Источник<select id="platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label>
@@ -37,16 +39,19 @@
     <p id="count" class="muted" aria-live="polite"></p><div id="cards"></div><p id="feed-status" class="status" role="status"></p>
     <div class="actions"><button id="more" class="more" type="button" hidden>Показать ещё</button></div>
   </section>
-  <section id="findings" aria-label="Находки" hidden>
+  <section id="findings" aria-label="Находки">
     <h2>Находки</h2>
     <p class="muted">Краткие сводки по изменениям. Неподтверждённые находки требуют проверки.</p>
     <div class="filters finding-filter-groups">
       <fieldset class="filter-group"><legend>Период</legend><label>Когда опубликовано<select id="finding-period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label></fieldset>
       <fieldset class="filter-group"><legend>Маркетплейс</legend><label>Площадка<select id="finding-platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label></fieldset>
+    </div>
+    <details class="extra-filters"><summary>Ещё фильтры</summary><div class="filters finding-filter-groups">
       <fieldset class="filter-group"><legend>Важность</legend><label>Уровень<select id="finding-importance"><option value="all">Все уровни</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label></fieldset>
       <fieldset class="filter-group"><legend>Тема и статус находки</legend><label>Тема<input id="finding-topic" type="search" maxlength="120" placeholder="Найти по теме"></label><div id="finding-topic-options" class="topic-options" role="group" aria-label="Доступные темы"></div><label>Проверка<select id="finding-verification"><option value="all">Любой статус</option><option value="confirmed">Подтверждено</option><option value="needs_check">Нужно проверить</option></select></label></fieldset>
       <fieldset class="filter-group"><legend>Тип источника</legend><label>Надёжность источника<select id="finding-source-type"><option value="all">Все источники</option><option value="official">Официальный</option><option value="regulator">Регуляторный</option><option value="industry">Отраслевой</option></select></label></fieldset>
-    </div>
+    </div></details>
+    <div id="finding-active-filters" class="finding-active-filters" aria-live="polite"></div>
     <p id="findings-count" class="muted" aria-live="polite"></p><div id="findings-cards"></div><p id="findings-status" class="status" role="status"></p>
     <div class="actions"><button id="findings-more" class="more" type="button" hidden>Показать ещё</button></div>
   </section>
@@ -55,7 +60,7 @@
     <h2>Источники</h2><div id="sources"></div><p id="source-status" class="status" role="status"></p>
   </section>
 </main>
-<nav class="bottom" aria-label="Разделы"><button id="nav-feed" type="button" aria-selected="true">Лента</button><button id="nav-findings" type="button" aria-selected="false">Находки</button><button id="nav-about" type="button" aria-selected="false">Как собрано</button></nav>
+<nav class="bottom" aria-label="Разделы"><button id="nav-feed" type="button" aria-selected="false">Лента</button><button id="nav-findings" type="button" aria-selected="true">Находки</button><button id="nav-about" type="button" aria-selected="false">Как собрано</button></nav>
 <script>
 (() => {
   'use strict';
@@ -89,19 +94,26 @@
     byId('cards').append(card);
   }
   function addFinding(item) {
-    const card = element('article', 'card');
+    const card = element('article', 'card finding-card');
+    const details = element('details', 'finding-details');
+    const disclosure = element('summary', '');
     const level = Number(item.importance);
     if (Number.isInteger(level) && level >= 1 && level <= 5) {
       const line = element('div', 'finding-level');
       const square = element('span', `importance-square importance-${level}`, String(level));
       square.setAttribute('aria-label', `Важность ${level}`);
       line.append(square, element('span', '', `Важность ${level}`));
-      card.append(line);
+      disclosure.append(line);
     }
-    card.append(element('div', 'meta', `${item.platform || 'Область не указана'} · ${item.topic || 'Без темы'} · ${item.verification === 'confirmed' ? 'Подтверждено' : 'Нужно проверить'}`));
-    card.append(element('h3', '', item.summary || 'Находка без описания'));
-    if (item.recommended_action) card.append(element('p', '', `Рекомендуемое действие: ${item.recommended_action}`));
-    if (item.effective_date) card.append(element('div', 'meta', `Дата вступления в силу: ${formatDate(item.effective_date)}`));
+    disclosure.append(element('div', 'meta', `${item.platform || 'Область не указана'} · ${item.topic || 'Без темы'} · ${item.verification === 'confirmed' ? 'Подтверждено' : 'Нужно проверить'}`));
+    const summary = item.summary || 'Находка без описания';
+    const preview = summary.length > 140 ? `${summary.slice(0, 137).trimEnd()}…` : summary;
+    disclosure.append(element('h3', '', preview));
+    details.append(disclosure);
+    const body = element('div', 'finding-details-body');
+    if (item.summary) body.append(element('p', 'finding-full-summary', item.summary));
+    if (item.recommended_action) body.append(element('p', '', `Рекомендуемое действие: ${item.recommended_action}`));
+    if (item.effective_date) body.append(element('div', 'meta', `Дата вступления в силу: ${formatDate(item.effective_date)}`));
     const links = element('div', 'finding-sources');
     for (const source of item.sources || []) {
       const url = safeURL(source.url);
@@ -110,7 +122,9 @@
       link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
       links.append(link);
     }
-    if (links.children.length) card.append(links);
+    if (links.children.length) body.append(links);
+    details.append(body);
+    card.append(details);
     byId('findings-cards').append(card);
   }
   async function request(path, options) { const response = await fetch(path, {cache:'no-store', credentials:'same-origin', ...options}); if (!response.ok) throw new Error(String(response.status)); return response; }
@@ -139,6 +153,7 @@
         const count=values[option.value]; if (count != null) option.textContent=`${option.dataset.baseLabel} (${count})`;
       }
     }
+    updateActiveFindingFilters();
     const topicOptions=byId('finding-topic-options');
     if (topicOptions && counts.topic_status && Array.isArray(counts.topic_status.topics)) {
       topicOptions.replaceChildren();
@@ -151,10 +166,25 @@
       }
     }
   }
+  function updateActiveFindingFilters() {
+    const host=byId('finding-active-filters'); if (!host) return;
+    host.replaceChildren();
+    const selected = [
+      ['finding-period','Период'], ['finding-platform','Площадка'], ['finding-importance','Важность'],
+      ['finding-verification','Проверка'], ['finding-source-type','Источник']
+    ];
+    for (const [id, label] of selected) {
+      const select=byId(id); if (!select || select.value === 'all') continue;
+      const option=select.options && select.options[select.selectedIndex];
+      host.append(element('span','active-filter',`${label}: ${option ? option.textContent.replace(/\s+\(\d+\)$/,'') : select.value}`));
+    }
+    const topic=byId('finding-topic').value.trim();
+    if (topic) host.append(element('span','active-filter',`Тема: ${topic}`));
+  }
   async function loadFindings(reset) {
     if (reset) { findingsState.generation++; findingsState.cursor=null; findingsState.loading=false; byId('findings-cards').replaceChildren(); byId('findings-count').textContent=''; }
     if (findingsState.loading) return;
-    const generation = findingsState.generation; findingsState.loading=true; byId('findings-more').hidden=true; byId('findings-status').textContent='Загружаем находки…';
+    const generation = findingsState.generation; findingsState.loading=true; byId('findings-more').hidden=true; byId('findings-status').textContent='Загружаем находки…'; updateActiveFindingFilters();
     const params = new URLSearchParams({period:byId('finding-period').value, platform:byId('finding-platform').value});
     const optional = {importance:byId('finding-importance').value, topic:byId('finding-topic').value.trim(), verification:byId('finding-verification').value, source_type:byId('finding-source-type').value};
     for (const [key, value] of Object.entries(optional)) if (value && value !== 'all') params.set(key, value);
@@ -186,7 +216,7 @@
     const feed = name === 'feed', findings = name === 'findings', about = name === 'about';
     byId('feed').hidden=!feed; byId('findings').hidden=!findings; byId('about').hidden=!about;
     byId('nav-feed').setAttribute('aria-selected',String(feed)); byId('nav-findings').setAttribute('aria-selected',String(findings)); byId('nav-about').setAttribute('aria-selected',String(about));
-    if (findings) loadFindings(true); if (about) loadSources();
+    if (feed) loadFeed(true); if (findings) loadFindings(true); if (about) loadSources();
   }
   byId('nav-feed').addEventListener('click',()=>tab('feed')); byId('nav-findings').addEventListener('click',()=>tab('findings')); byId('nav-about').addEventListener('click',()=>tab('about'));
   byId('period').addEventListener('change',()=>loadFeed(true)); byId('platform').addEventListener('change',()=>loadFeed(true)); byId('more').addEventListener('click',()=>loadFeed(false));
@@ -195,8 +225,8 @@
   byId('finding-verification').addEventListener('change',()=>{byId('finding-topic').value=''; loadFindings(true);});
   byId('findings-more').addEventListener('click',()=>loadFindings(false));
   async function start() {
-    try { if (tg && tg.initData) await request('/miniapp/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData})}); await loadFeed(true); }
-    catch (_) { byId('feed-status').textContent='Не удалось подтвердить доступ. Откройте ленту через бота.'; }
+    try { if (tg && tg.initData) await request('/miniapp/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg.initData})}); tab('findings'); }
+    catch (_) { byId('findings-status').textContent='Не удалось подтвердить доступ. Откройте ленту через бота.'; }
   }
   start();
 })();

@@ -456,7 +456,7 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
         snapshot = ("expired AS (DELETE FROM feed_snapshots WHERE created_at < now() - INTERVAL '30 minutes'), "
                     "snapshot AS (INSERT INTO feed_snapshots (id, period, platform, material_ids) "
                     "SELECT %s, %s, %s, COALESCE(array_agg(m.id), ARRAY[]::integer[]) "
-                    "FROM materials m JOIN sources s ON s.id = m.source_id WHERE " + where +
+                    "FROM materials m JOIN sources s ON s.id = m.source_id WHERE m.translation_status <> 'pending' AND " + where +
                     " RETURNING id, material_ids)")
         query_params = [snapshot_id, period, platform] + params
     else:
@@ -472,8 +472,8 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
         'SELECT m.id, m.title, m.text, m.url, m.published_at, m.collected_at, '
         'm.translation_status, m.title_ru, m.text_ru, '
         's.name AS source, s.category, COALESCE(m.published_at, m.collected_at) AS sort_date '
-        'FROM materials m JOIN sources s ON s.id = m.source_id CROSS JOIN snapshot WHERE m.id = ANY(snapshot.material_ids)) '
-        'SELECT snapshot.id, cardinality(snapshot.material_ids), page.* FROM snapshot '
+        "FROM materials m JOIN sources s ON s.id = m.source_id CROSS JOIN snapshot WHERE m.id = ANY(snapshot.material_ids) AND m.translation_status <> 'pending') "
+        'SELECT snapshot.id, (SELECT count(*) FROM filtered), page.* FROM snapshot '
         'LEFT JOIN LATERAL (SELECT * FROM filtered' + page_where +
         ' ORDER BY sort_date DESC, id DESC LIMIT %s) page ON true',
         tuple(query_params + [limit + 1]),
