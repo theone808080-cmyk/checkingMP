@@ -274,6 +274,150 @@ CREATE TABLE IF NOT EXISTS finding_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS finding_quality_runs (
+    id BIGSERIAL PRIMARY KEY,
+    rules_version TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    requested_limit SMALLINT NOT NULL CHECK (requested_limit BETWEEN 1 AND 50),
+    status TEXT NOT NULL DEFAULT 'started' CHECK (status IN ('started', 'success', 'partial', 'failed')),
+    finding_count INTEGER NOT NULL DEFAULT 0 CHECK (finding_count >= 0),
+    error_code TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    elapsed_ms INTEGER CHECK (elapsed_ms IS NULL OR elapsed_ms >= 0),
+    prompt_tokens INTEGER CHECK (prompt_tokens IS NULL OR prompt_tokens >= 0),
+    completion_tokens INTEGER CHECK (completion_tokens IS NULL OR completion_tokens >= 0),
+    cost NUMERIC CHECK (cost IS NULL OR cost >= 0),
+    CHECK ((status = 'started' AND finished_at IS NULL) OR status <> 'started')
+);
+
+CREATE TABLE IF NOT EXISTS finding_quality_run_findings (
+    run_id BIGINT NOT NULL REFERENCES finding_quality_runs(id),
+    finding_id INTEGER NOT NULL REFERENCES events(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, finding_id)
+);
+
+CREATE OR REPLACE FUNCTION finding_quality_only_insufficient_source(issues JSONB) RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT jsonb_array_length(issues) > 0 AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(issues) AS item
+        WHERE item->>'type' <> 'insufficient_source'
+    );
+$$;
+
+CREATE TABLE IF NOT EXISTS finding_quality_results (
+    id BIGSERIAL PRIMARY KEY,
+    run_id BIGINT NOT NULL REFERENCES finding_quality_runs(id),
+    finding_id INTEGER NOT NULL REFERENCES events(id),
+    target TEXT NOT NULL CHECK (target IN ('summary', 'recommendation')),
+    status TEXT NOT NULL CHECK (status IN ('ok', 'review', 'issue')),
+    issues JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(issues) = 'array'),
+    error_code TEXT,
+    elapsed_ms INTEGER CHECK (elapsed_ms IS NULL OR elapsed_ms >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (run_id, finding_id, target),
+    CONSTRAINT finding_quality_results_run_finding_fk
+        FOREIGN KEY (run_id, finding_id) REFERENCES finding_quality_run_findings(run_id, finding_id),
+    CONSTRAINT finding_quality_results_ok_consistent
+        CHECK (status <> 'ok' OR (issues = '[]'::jsonb AND error_code IS NULL)),
+    CONSTRAINT finding_quality_results_issue_consistent
+        CHECK (status <> 'issue' OR (jsonb_array_length(issues) > 0 AND error_code IS NULL)),
+    CONSTRAINT finding_quality_results_insufficient_source_review
+        CHECK (status <> 'issue' OR NOT finding_quality_only_insufficient_source(issues)),
+    CONSTRAINT finding_quality_results_error_consistent
+        CHECK (error_code IS NULL OR (status = 'review' AND issues = '[]'::jsonb)),
+    CONSTRAINT finding_quality_results_review_explained
+        CHECK (status <> 'review' OR jsonb_array_length(issues) > 0 OR error_code IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS finding_quality_results_run_idx
+    ON finding_quality_results (run_id, finding_id, target);
+
+CREATE TABLE IF NOT EXISTS finding_quality_labels (
+    id BIGSERIAL PRIMARY KEY,
+    run_id BIGINT NOT NULL REFERENCES finding_quality_runs(id),
+    finding_id INTEGER NOT NULL REFERENCES events(id),
+    summary_facts TEXT NOT NULL CHECK (summary_facts IN ('ok', 'issue', 'uncertain')),
+    omitted_condition BOOLEAN NOT NULL,
+    omitted_deadline BOOLEAN NOT NULL,
+    completeness_uncertain BOOLEAN NOT NULL DEFAULT FALSE,
+    recommendation TEXT NOT NULL CHECK (recommendation IN ('supported', 'unsupported', 'uncertain')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (run_id, finding_id),
+    CONSTRAINT finding_quality_labels_run_finding_fk
+        FOREIGN KEY (run_id, finding_id) REFERENCES finding_quality_run_findings(run_id, finding_id)
+);
+
+-- Preserve the exact historical sample before enforcing run membership on older installs.
+INSERT INTO finding_quality_run_findings (run_id, finding_id)
+SELECT run_id, finding_id FROM finding_quality_results
+UNION
+SELECT run_id, finding_id FROM finding_quality_labels
+ON CONFLICT (run_id, finding_id) DO NOTHING;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='finding_quality_results_run_finding_fk'
+                   AND conrelid='finding_quality_results'::regclass) THEN
+        ALTER TABLE finding_quality_results ADD CONSTRAINT finding_quality_results_run_finding_fk
+            FOREIGN KEY (run_id, finding_id) REFERENCES finding_quality_run_findings(run_id, finding_id) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='finding_quality_results_ok_consistent'
+                   AND conrelid='finding_quality_results'::regclass) THEN
+        ALTER TABLE finding_quality_results ADD CONSTRAINT finding_quality_results_ok_consistent
+            CHECK (status <> 'ok' OR (issues = '[]'::jsonb AND error_code IS NULL)) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='finding_quality_results_issue_consistent'
+                   AND conrelid='finding_quality_results'::regclass) THEN
+        ALTER TABLE finding_quality_results ADD CONSTRAINT finding_quality_results_issue_consistent
+            CHECK (status <> 'issue' OR (jsonb_array_length(issues) > 0 AND error_code IS NULL)) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='finding_quality_results_insufficient_source_review'
+                   AND conrelid='finding_quality_results'::regclass) THEN
+        ALTER TABLE finding_quality_results ADD CONSTRAINT finding_quality_results_insufficient_source_review
+            CHECK (status <> 'issue' OR NOT finding_quality_only_insufficient_source(issues)) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='finding_quality_results_error_consistent'
+                   AND conrelid='finding_quality_results'::regclass) THEN
+        ALTER TABLE finding_quality_results ADD CONSTRAINT finding_quality_results_error_consistent
+            CHECK (error_code IS NULL OR (status = 'review' AND issues = '[]'::jsonb)) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='finding_quality_results_review_explained'
+                   AND conrelid='finding_quality_results'::regclass) THEN
+        ALTER TABLE finding_quality_results ADD CONSTRAINT finding_quality_results_review_explained
+            CHECK (status <> 'review' OR jsonb_array_length(issues) > 0 OR error_code IS NOT NULL) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='finding_quality_labels_run_finding_fk'
+                   AND conrelid='finding_quality_labels'::regclass) THEN
+        ALTER TABLE finding_quality_labels ADD CONSTRAINT finding_quality_labels_run_finding_fk
+            FOREIGN KEY (run_id, finding_id) REFERENCES finding_quality_run_findings(run_id, finding_id) NOT VALID;
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION reject_finding_quality_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'finding quality results and labels are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS finding_quality_run_findings_append_only ON finding_quality_run_findings;
+CREATE TRIGGER finding_quality_run_findings_append_only
+    BEFORE UPDATE OR DELETE ON finding_quality_run_findings
+    FOR EACH ROW EXECUTE FUNCTION reject_finding_quality_mutation();
+
+DROP TRIGGER IF EXISTS finding_quality_results_append_only ON finding_quality_results;
+CREATE TRIGGER finding_quality_results_append_only
+    BEFORE UPDATE OR DELETE ON finding_quality_results
+    FOR EACH ROW EXECUTE FUNCTION reject_finding_quality_mutation();
+
+DROP TRIGGER IF EXISTS finding_quality_labels_append_only ON finding_quality_labels;
+CREATE TRIGGER finding_quality_labels_append_only
+    BEFORE UPDATE OR DELETE ON finding_quality_labels
+    FOR EACH ROW EXECUTE FUNCTION reject_finding_quality_mutation();
+
 CREATE TABLE IF NOT EXISTS notification_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     initialized BOOLEAN NOT NULL
@@ -290,4 +434,3 @@ CREATE TABLE IF NOT EXISTS notification_materials (
     material_id INTEGER PRIMARY KEY REFERENCES materials(id),
     batch_id BIGINT REFERENCES notification_batches(id)
 );
-

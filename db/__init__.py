@@ -1267,3 +1267,43 @@ def relevance_evaluation_rows(conn, rules_version: str) -> list[dict[str, Any]]:
     ).fetchall()
     columns = ("material_id", "title", "predicted", "label")
     return [dict(zip(columns, row)) for row in rows]
+
+
+def audit_sample(conn, *, limit: int):
+    from db.finding_quality import audit_sample as fetch_sample
+    return fetch_sample(conn, limit=limit)
+
+
+def create_finding_quality_run(conn, *, limit: int, model: str, rules_version: str) -> int:
+    from db.finding_quality import create_run
+    return create_run(conn, limit=limit, model=model, rules_version=rules_version)
+
+
+def save_finding_quality_results(conn, run_id: int, results):
+    from db.finding_quality import save_results
+    return save_results(conn, run_id, results)
+
+
+def save_finding_quality_labels(conn, run_id: int, labels):
+    from db.finding_quality import save_labels
+    return save_labels(conn, run_id, labels)
+
+
+def finish_finding_quality_run(conn, run_id: int, **values):
+    from db.finding_quality import finish_run
+    return finish_run(conn, run_id, **values)
+
+
+def finding_quality_label_rows(conn, run_id: int):
+    from db.finding_quality import finding_quality_label_rows as fetch_rows
+    return fetch_rows(conn, run_id)
+
+
+def finding_quality_report_rows(conn, run_id: int):
+    from db.finding_quality import finding_quality_report_rows as fetch_rows
+    return fetch_rows(conn, run_id)
+
+
+def finding_quality_run(conn, run_id: int):
+    from db.finding_quality import finding_quality_run as fetch_run
+    return fetch_run(conn, run_id)
