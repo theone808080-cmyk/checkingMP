@@ -15,6 +15,186 @@ class FeedValidationTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 db.feed_materials(None, **kwargs)
 
+    def test_normalized_publication_fingerprint_only_ignores_unicode_and_whitespace_formatting(self):
+        same = db.normalized_publication_fingerprint("  Новое\u00a0правило  ", "Проверьте\n\nнастройки\tпоставки")
+        self.assertEqual(same, db.normalized_publication_fingerprint("Новое правило", "Проверьте настройки поставки"))
+        self.assertNotEqual(same, db.normalized_publication_fingerprint("Новое правило", "Проверьте настройки возврата"))
+
+
+@unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "TEST_DATABASE_URL is not configured")
+class ExactDuplicatePostgresTests(unittest.TestCase):
+    def setUp(self):
+        self.schema = "exact_duplicate_" + uuid.uuid4().hex
+        self.conn = psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True)
+        self.conn.execute(f'CREATE SCHEMA {self.schema}')
+        self.conn.execute(f'SET search_path = {self.schema}')
+        db.init_schema(self.conn)
+        db.sync_sources(self.conn)
+        self.addCleanup(self.conn.close)
+        self.addCleanup(self._drop_schema)
+
+    def _drop_schema(self):
+        with psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True) as cleanup:
+            cleanup.execute(f'DROP SCHEMA {self.schema} CASCADE')
+
+    def _source(self, code):
+        return self.conn.execute("SELECT id FROM sources WHERE code=%s", (code,)).fetchone()[0]
+
+    def _signal(self, material_id, *, summary="Площадка изменила правило поставки"):
+        return {"material_ids": [material_id], "platform": "Ozon", "topic": "rules", "importance": 4,
+                "summary": summary, "recommended_action": "Проверьте настройки", "verification": "needs_check"}
+
+    def _translation(self, material_id):
+        return {"material_id": material_id, "title_ru": "Новое правило", "text_ru": "Проверьте настройки поставки."}
+
+    def test_exact_normalized_copy_links_to_existing_finding_and_keeps_both_sources(self):
+        run_id = db.start_run(self.conn, "collector")
+        first_created, first_id = db.add_material(self.conn, self._source("ozon_telegram"), run_id, {
+            "url": "https://one.example/post", "title": "Новое правило", "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        self.assertTrue(first_created)
+        db.import_signals(self.conn, [self._signal(first_id)], translations=[self._translation(first_id)])
+        second_created, second_id = db.add_material(self.conn, self._source("retail_ru_telegram"), run_id, {
+            "url": "https://two.example/post", "title": "  Новое\u00a0правило  ", "text": "Проверьте\nнастройки   поставки.", "published_at": None,
+        }, return_id=True)
+        self.assertTrue(second_created)
+        db.import_signals(self.conn, [self._signal(second_id, summary="Другая формулировка модели")],
+                          translations=[self._translation(second_id)], reject_confirmed=True)
+        event_rows = self.conn.execute("SELECT id FROM events ORDER BY id").fetchall()
+        linked = self.conn.execute("SELECT material_id FROM event_materials WHERE event_id=%s ORDER BY material_id", (event_rows[0][0],)).fetchall()
+        self.assertEqual(len(event_rows), 1)
+        self.assertEqual(linked, [(first_id,), (second_id,)])
+        source_urls = self.conn.execute("SELECT url FROM materials ORDER BY id").fetchall()
+        self.assertEqual(source_urls, [("https://one.example/post",), ("https://two.example/post",)])
+
+    def test_worker_exact_copy_keeps_existing_confirmed_finding_without_overwriting_it(self):
+        run_id = db.start_run(self.conn, "collector")
+        _, confirmed_id = db.add_material(self.conn, self._source("ozon_telegram"), run_id, {
+            "url": "https://one.example/post", "title": "Новое правило",
+            "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        approved = {**self._signal(confirmed_id), "summary": "Подтверждённое правило поставки",
+                    "recommended_action": "Сохраните подтверждение", "verification": "confirmed"}
+        db.import_signals(self.conn, [approved], translations=[self._translation(confirmed_id)])
+        _, copy_id = db.add_material(self.conn, self._source("retail_ru_telegram"), run_id, {
+            "url": "https://two.example/post", "title": "Новое правило",
+            "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        worker_signal = {**self._signal(copy_id), "summary": "Другая автоматическая сводка",
+                         "recommended_action": "Автоматическая рекомендация", "verification": "needs_check"}
+        db.import_signals(self.conn, [worker_signal], translations=[self._translation(copy_id)], reject_confirmed=True)
+        event_id, verification, summary, action = self.conn.execute(
+            "SELECT id, verification, summary, recommended_action FROM events ORDER BY id").fetchone()
+        linked = self.conn.execute("SELECT material_id FROM event_materials WHERE event_id=%s ORDER BY material_id", (event_id,)).fetchall()
+        self.assertEqual((verification, summary, action),
+                         ("confirmed", "Подтверждённое правило поставки", "Сохраните подтверждение"))
+        self.assertEqual(linked, [(confirmed_id,), (copy_id,)])
+
+    def test_similar_but_not_exact_publication_remains_a_separate_finding(self):
+        run_id = db.start_run(self.conn, "collector")
+        _, first_id = db.add_material(self.conn, self._source("ozon_telegram"), run_id, {
+            "url": "https://one.example/post", "title": "Новое правило", "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        _, second_id = db.add_material(self.conn, self._source("retail_ru_telegram"), run_id, {
+            "url": "https://two.example/post", "title": "Новое правило", "text": "Проверьте настройки возврата.", "published_at": None,
+        }, return_id=True)
+        db.import_signals(self.conn, [self._signal(first_id)], translations=[self._translation(first_id)])
+        db.import_signals(self.conn, [self._signal(second_id, summary="Изменилось правило возврата")], translations=[self._translation(second_id)])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM events").fetchone()[0], 2)
+
+    def test_same_model_event_key_does_not_merge_different_publications(self):
+        run_id = db.start_run(self.conn, "collector")
+        _, first_id = db.add_material(self.conn, self._source("ozon_telegram"), run_id, {
+            "url": "https://one.example/post", "title": "Новое правило поставки",
+            "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        _, second_id = db.add_material(self.conn, self._source("retail_ru_telegram"), run_id, {
+            "url": "https://two.example/post", "title": "Новое правило возврата",
+            "text": "Проверьте настройки возврата.", "published_at": None,
+        }, return_id=True)
+        db.import_signals(self.conn, [{**self._signal(first_id), "event_key": "model-reused-key"}],
+                          translations=[self._translation(first_id)])
+        db.import_signals(self.conn, [{**self._signal(second_id, summary="Площадка изменила правило возврата"),
+                                       "event_key": "model-reused-key"}],
+                          translations=[self._translation(second_id)])
+        rows = self.conn.execute("""SELECT e.id, em.material_id FROM events e
+                                   JOIN event_materials em ON em.event_id=e.id ORDER BY em.material_id""").fetchall()
+        self.assertEqual([material_id for _, material_id in rows], [first_id, second_id])
+        self.assertEqual(len({event_id for event_id, _ in rows}), 2)
+
+    def test_manual_confirmed_exact_copy_promotes_existing_unconfirmed_finding(self):
+        run_id = db.start_run(self.conn, "collector")
+        _, initial_id = db.add_material(self.conn, self._source("ozon_telegram"), run_id, {
+            "url": "https://one.example/post", "title": "Новое правило",
+            "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        db.import_signals(self.conn, [self._signal(initial_id)], translations=[self._translation(initial_id)])
+        _, reviewed_id = db.add_material(self.conn, self._source("retail_ru_telegram"), run_id, {
+            "url": "https://two.example/post", "title": "Новое правило",
+            "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        confirmed = {**self._signal(reviewed_id), "verification": "confirmed"}
+        db.import_signals(self.conn, [confirmed], translations=[self._translation(reviewed_id)], reject_confirmed=False)
+        event_id, verification, summary, action = self.conn.execute(
+            "SELECT id, verification, summary, recommended_action FROM events ORDER BY id").fetchone()
+        linked = self.conn.execute("SELECT material_id FROM event_materials WHERE event_id=%s ORDER BY material_id", (event_id,)).fetchall()
+        self.assertEqual(verification, "confirmed")
+        self.assertEqual((summary, action), ("Площадка изменила правило поставки", "Проверьте настройки"))
+        self.assertEqual(linked, [(initial_id,), (reviewed_id,)])
+
+    def test_manual_confirmed_exact_copy_with_changed_text_creates_separate_finding(self):
+        run_id = db.start_run(self.conn, "collector")
+        _, initial_id = db.add_material(self.conn, self._source("ozon_telegram"), run_id, {
+            "url": "https://one.example/post", "title": "Новое правило",
+            "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        db.import_signals(self.conn, [self._signal(initial_id)], translations=[self._translation(initial_id)])
+        _, reviewed_id = db.add_material(self.conn, self._source("retail_ru_telegram"), run_id, {
+            "url": "https://two.example/post", "title": "Новое правило",
+            "text": "Проверьте настройки поставки.", "published_at": None,
+        }, return_id=True)
+        confirmed = {**self._signal(reviewed_id, summary="Владелец подтвердил отдельное правило"),
+                     "recommended_action": "Сохраните подтверждение", "verification": "confirmed"}
+        db.import_signals(self.conn, [confirmed], translations=[self._translation(reviewed_id)], reject_confirmed=False)
+        rows = self.conn.execute("""SELECT e.verification, e.summary, e.recommended_action, em.material_id
+                                   FROM events e JOIN event_materials em ON em.event_id=e.id
+                                   ORDER BY em.material_id""").fetchall()
+        self.assertEqual(rows, [
+            ("needs_check", "Площадка изменила правило поставки", "Проверьте настройки", initial_id),
+            ("confirmed", "Владелец подтвердил отдельное правило", "Сохраните подтверждение", reviewed_id),
+        ])
+
+    def test_ambiguous_exact_fingerprint_never_chooses_between_existing_findings(self):
+        run_id = db.start_run(self.conn, "collector")
+        material_ids = []
+        for index, source_code in enumerate(("ozon_telegram", "retail_ru_telegram", "oborot_telegram"), start=1):
+            _, material_id = db.add_material(self.conn, self._source(source_code), run_id, {
+                "url": f"https://{index}.example/post", "title": "Новое правило",
+                "text": "Проверьте настройки поставки.", "published_at": None,
+            }, return_id=True)
+            material_ids.append(material_id)
+        self.conn.execute("""UPDATE materials SET status='done', translation_status='ready',
+                             title_ru='Новое правило', text_ru='Проверьте настройки поставки.'
+                             WHERE id = ANY(%s)""", (material_ids[:2],))
+        historical_events = []
+        for index, material_id in enumerate(material_ids[:2], start=1):
+            event_id = self.conn.execute(
+                """INSERT INTO events
+                   (event_key, platform, topic, importance, seller_impact, summary, recommended_action, verification)
+                   VALUES (%s, 'Ozon', 'rules', 4, 'unclear', %s, 'Проверьте настройки', 'needs_check')
+                   RETURNING id""",
+                (f"historical-{index}", f"Историческая находка {index}"),
+            ).fetchone()[0]
+            historical_events.append(event_id)
+            self.conn.execute("INSERT INTO event_materials (event_id, material_id) VALUES (%s, %s)",
+                              (event_id, material_id))
+        db.import_signals(self.conn, [self._signal(material_ids[2], summary="Третье сообщение")],
+                          translations=[self._translation(material_ids[2])])
+        rows = self.conn.execute("""SELECT em.material_id, em.event_id FROM event_materials em
+                                   ORDER BY em.material_id""").fetchall()
+        self.assertEqual([material_id for material_id, _ in rows], material_ids)
+        self.assertEqual(len({event_id for _, event_id in rows}), 3)
+
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "TEST_DATABASE_URL is not configured")
 class FeedPostgresTests(unittest.TestCase):

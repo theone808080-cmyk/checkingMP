@@ -40,7 +40,9 @@ TRANSLATIONS = [
     {"material_id": 1, "title_ru": "Пример", "text_ru": "Английский фрагмент"},
     {"material_id": 2, "title_ru": "Другая новость", "text_ru": "Другой текст"},
 ]
-SIGNAL = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "importance": 3, "summary": "Summary", "recommended_action": "Check", "verification": "needs_check"}
+SIGNAL = {"material_ids": [1], "platform": "Ozon", "topic": "rules", "importance": 3,
+          "summary": "Изменились правила площадки", "recommended_action": "Проверить настройки",
+          "verification": "needs_check"}
 
 
 def response(content):
@@ -116,6 +118,53 @@ class WorkerTests(unittest.TestCase):
         for translations in invalid:
             with self.subTest(translations=translations), self.assertRaises(ValueError):
                 worker.validate({**valid, "translations": translations}, BATCH)
+
+    def test_rejects_predominantly_english_generated_content_before_import(self):
+        english_translation = [
+            {**TRANSLATIONS[0], "title_ru": "New marketplace rule", "text_ru": "Sellers must update product cards before Friday."},
+            TRANSLATIONS[1],
+        ]
+        english_signal = {**SIGNAL, "summary": "The marketplace changed delivery terms for sellers.",
+                          "recommended_action": "Review all shipment settings today."}
+        for payload in (
+            {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": english_translation},
+            {"signals": [english_signal], "skipped_material_ids": [2], "translations": TRANSLATIONS},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                worker.validate(payload, BATCH)
+
+    def test_accepts_russian_generated_content_with_latin_marketplace_names(self):
+        payload = {
+            "signals": [{**SIGNAL, "summary": "Ozon меняет условия поставки для продавцов.",
+                         "recommended_action": "Проверьте настройки Ozon до пятницы."}],
+            "skipped_material_ids": [2],
+            "translations": [
+                {**TRANSLATIONS[0], "title_ru": "Ozon: новое правило", "text_ru": "Продавцам нужно обновить карточки в Ozon."},
+                TRANSLATIONS[1],
+            ],
+        }
+        self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["summary"], payload["signals"][0]["summary"])
+
+    def test_empty_original_allows_empty_russian_translation_but_rejects_english_text(self):
+        empty_body_batch = [{**BATCH[0], "text": ""}, BATCH[1]]
+        valid_translations = [{**TRANSLATIONS[0], "text_ru": ""}, TRANSLATIONS[1]]
+        valid = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": valid_translations}
+        self.assertEqual(worker.validate(valid, empty_body_batch)["translations"], valid_translations)
+        english = [{**TRANSLATIONS[0], "text_ru": "English response without a Russian translation."}, TRANSLATIONS[1]]
+        with self.assertRaises(ValueError):
+            worker.validate({**valid, "translations": english}, empty_body_batch)
+
+    def test_invalid_language_response_does_not_import_or_advance_queue(self):
+        payload = {
+            "signals": [{**SIGNAL, "summary": "Marketplace changes delivery terms for all sellers.",
+                         "recommended_action": "Review the source today."}],
+            "skipped_material_ids": [2], "translations": TRANSLATIONS,
+        }
+        with patch.object(worker, "infer", return_value=payload):
+            with self.assertRaises(ValueError):
+                worker.process(self.conn)
+        self.import_mock.assert_not_called()
+        self.assertEqual(self.conn.transactions, 0)
 
     def test_translation_only_call_uses_existing_model_and_validates_results(self):
         payload = {"translations": TRANSLATIONS}
@@ -306,7 +355,7 @@ class WorkerTests(unittest.TestCase):
         conn = ConflictConnection()
         with self.assertRaisesRegex(ValueError, "confirmed"):
             self.actual_import(conn, [SIGNAL], reject_confirmed=True)
-        self.assertIn("WHERE events.verification <> 'confirmed'", conn.query)
+        self.assertIn("events.verification <> 'confirmed'", conn.query)
 
     def test_manual_signal_import_rejects_invalid_importance_before_database_write(self):
         class NoWriteConnection:

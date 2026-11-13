@@ -21,6 +21,7 @@
     .finding-card { padding:10px 12px; } .finding-card summary { cursor:pointer; } .finding-card summary:focus-visible, .extra-filters summary:focus-visible { outline:3px solid var(--accent); outline-offset:2px; } .finding-card .finding-level { margin-bottom:3px; } .finding-card .importance-square { width:24px; height:24px; } .finding-card h3 { margin:4px 0; font-size:16px; line-height:1.32; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .extra-filters { margin:8px 0 5px; } .extra-filters > summary { display:inline-block; cursor:pointer; color:var(--accent); font-weight:700; padding:5px 0; } .finding-filter-groups { margin:8px 0; } .filters.finding-filter-groups > .filter-group { padding:8px 10px; } .finding-active-filters { display:flex; flex-wrap:wrap; gap:6px; } .active-filter { max-width:100%; overflow-wrap:anywhere; border-radius:999px; padding:3px 8px; background:var(--card); color:var(--muted); border:1px solid var(--line); font-size:12px; }
     .finding-statuses { display:flex; flex-wrap:wrap; gap:5px; margin:7px 0; } .finding-status { max-width:100%; overflow-wrap:anywhere; border:1px solid var(--line); border-radius:999px; padding:2px 7px; color:var(--fg); background:var(--bg); font-size:11px; line-height:1.45; }
+    .finding-checks { margin-top:10px; } .finding-checks > summary { cursor:pointer; color:var(--muted); font-size:13px; } .finding-attention { display:inline-block; margin:5px 0; border-radius:6px; padding:3px 7px; color:#7a3500; background:#ffe3bc; font-size:12px; }
     .importance-1 { background:#b9c1c7; } .importance-2 { background:#79b9e7; } .importance-3 { background:#f4d35e; } .importance-4 { background:#f4a261; } .importance-5 { background:#ef6c68; }
     .finding-sources { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:8px; } .topic-options { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 8px; } .topic-chip { border:1px solid var(--line); border-radius:999px; padding:5px 9px; color:var(--fg); background:var(--card); font-size:13px; cursor:pointer; } .topic-chip[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
     .actions { text-align:center; margin:20px 0; } .more { background:var(--accent); color:var(--button-text); border:0; border-radius:10px; padding:11px 20px; font-weight:700; cursor:pointer; }
@@ -114,16 +115,22 @@
     disclosure.append(element('div', 'meta', `${item.platform || 'Область не указана'} · ${item.topic || 'Без темы'}`));
     const impactLabels = {positive:'Выгода продавцу', negative:'Риск для продавца', mixed:'Смешанное влияние', neutral:'Нейтральное влияние', unclear:'Влияние неясно'};
     if (impactLabels[item.seller_impact]) disclosure.append(element('span', `seller-impact seller-impact-${item.seller_impact}`, impactLabels[item.seller_impact]));
+    const attentionStatuses = ['review', 'issue'];
+    if (attentionStatuses.includes(item.summary_audit) || attentionStatuses.includes(item.recommendation_audit)) {
+      disclosure.append(element('span', 'finding-attention', 'Есть замечание'));
+    }
     const classificationLabels = {practical_change:'конкретное изменение', seller_action_or_risk:'действие или риск для продавца', industry_context:'отраслевой контекст', irrelevant:'нерелевантно', uncertain:'неоднозначно', not_assessed:'нет оценки'};
     const relevanceLabels = {relevant:'релевантно продавцу', irrelevant:'не относится к продавцу', uncertain:'неясно', not_assessed:'нет оценки'};
     const auditLabels = {ok:'без замечаний', review:'требуется разбор', issue:'есть замечания', not_checked:'не проверено'};
+    const checks = element('details', 'finding-checks');
+    checks.append(element('summary', '', 'Проверки'));
     const statuses = element('div', 'finding-statuses');
     statuses.append(element('span', 'finding-status', `Классификатор: ${classificationLabels[item.classification] || 'нет оценки'}`));
     statuses.append(element('span', 'finding-status', `Релевантность: ${relevanceLabels[item.relevance] || 'нет оценки'}`));
     statuses.append(element('span', 'finding-status', `Проверка находки: ${item.verification === 'confirmed' ? 'подтверждена' : 'нужно проверить'}`));
     statuses.append(element('span', 'finding-status', `Аудит сводки: ${auditLabels[item.summary_audit] || 'не проверено'}`));
     statuses.append(element('span', 'finding-status', `Аудит рекомендации: ${auditLabels[item.recommendation_audit] || 'не проверено'}`));
-    disclosure.append(statuses);
+    checks.append(statuses);
     const summary = item.summary || 'Находка без описания';
     const preview = summary.length > 140 ? `${summary.slice(0, 137).trimEnd()}…` : summary;
     disclosure.append(element('h3', '', preview));
@@ -132,6 +139,8 @@
     if (item.summary) body.append(element('p', 'finding-full-summary', item.summary));
     if (item.recommended_action) body.append(element('p', '', `Рекомендуемое действие: ${item.recommended_action}`));
     if (item.effective_date) body.append(element('div', 'meta', `Дата вступления в силу: ${formatDate(item.effective_date)}`));
+    body.append(element('p', 'meta', `Материалов: ${(item.sources || []).length}`));
+    body.append(checks);
     const links = element('div', 'finding-sources');
     for (const source of item.sources || []) {
       const url = safeURL(source.url);

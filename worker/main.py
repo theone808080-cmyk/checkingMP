@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -24,6 +25,14 @@ class ResponseValidationError(ValueError):
     def __init__(self, reason_code):
         self.reason_code = reason_code
         super().__init__("Invalid OpenRouter response")
+
+
+def is_russian_text(value: str) -> bool:
+    letters = [character for character in unicodedata.normalize("NFC", value) if character.isalpha()]
+    if not letters:
+        return False
+    cyrillic_count = sum("CYRILLIC" in unicodedata.name(character, "") for character in letters)
+    return cyrillic_count * 2 >= len(letters)
 
 
 def open_url(request, timeout):
@@ -98,6 +107,8 @@ def validate(payload, batch):
         for field in ("platform", "topic", "summary", "recommended_action"):
             if not isinstance(signal.get(field), str) or not signal[field].strip():
                 raise ResponseValidationError("schema_signal_fields")
+        if not is_russian_text(signal["summary"]) or not is_russian_text(signal["recommended_action"]):
+            raise ResponseValidationError("schema_language_signal")
         if type(signal.get("importance")) is not int or not 1 <= signal["importance"] <= 5:
             raise ResponseValidationError("schema_importance")
         try:
@@ -142,6 +153,9 @@ def validate_translations(translations, batch):
         material = next(item for item in batch if item["material_id"] == material_id)
         if (material.get("text") or "")[:400].strip() and not translation["text_ru"].strip():
             raise ResponseValidationError("schema_translation")
+        if (not is_russian_text(translation["title_ru"]) or
+                (translation["text_ru"].strip() and not is_russian_text(translation["text_ru"]))):
+            raise ResponseValidationError("schema_language_translation")
         translated_ids.add(material_id)
         translated.append(translation)
     if translated_ids != expected_translation_ids:

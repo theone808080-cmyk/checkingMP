@@ -140,8 +140,12 @@ CREATE TABLE IF NOT EXISTS materials (
     published_at TIMESTAMPTZ,
     collected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     fingerprint TEXT NOT NULL UNIQUE,
+    content_fingerprint TEXT,
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'done', 'skipped', 'failed'))
 );
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS content_fingerprint TEXT;
+CREATE INDEX IF NOT EXISTS materials_content_fingerprint_idx
+    ON materials (content_fingerprint) WHERE content_fingerprint IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS processing_trace (
     id BIGSERIAL PRIMARY KEY,

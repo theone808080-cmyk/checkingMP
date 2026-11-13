@@ -8,6 +8,7 @@ import binascii
 import json
 import os
 import re
+import unicodedata
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -31,8 +32,35 @@ def init_schema(conn) -> None:
     conn.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK,))
     try:
         conn.execute(SCHEMA.read_text(encoding="utf-8"))
+        _backfill_content_fingerprints(conn)
     finally:
         conn.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK,))
+
+
+def _normalized_publication_part(value: str | None) -> str:
+    text = unicodedata.normalize("NFC", value or "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalized_publication_fingerprint(title: str, text: str | None) -> str | None:
+    normalized_title = _normalized_publication_part(title)
+    normalized_text = _normalized_publication_part(text)
+    if not normalized_title or not normalized_text:
+        return None
+    return hashlib.sha256((normalized_title + "\n" + normalized_text).encode("utf-8")).hexdigest()
+
+
+def _backfill_content_fingerprints(conn) -> None:
+    rows = conn.execute(
+        "SELECT id, title, text FROM materials WHERE content_fingerprint IS NULL"
+    ).fetchall()
+    for material_id, title, text in rows:
+        fingerprint = normalized_publication_fingerprint(title, text)
+        if fingerprint:
+            conn.execute(
+                "UPDATE materials SET content_fingerprint=%s WHERE id=%s AND content_fingerprint IS NULL",
+                (fingerprint, material_id),
+            )
 
 
 def sync_sources(conn) -> int:
@@ -1095,12 +1123,14 @@ def add_material(conn, source_id: int, run_id: int | None, item: dict[str, Any],
     fingerprint = hashlib.sha256(
         (item["url"].strip() + "\n" + item["title"].strip() + "\n" + body).encode("utf-8")
     ).hexdigest()
+    content_fingerprint = normalized_publication_fingerprint(item["title"], body)
     row = conn.execute(
         """INSERT INTO materials
-           (source_id, run_id, url, title, text, published_at, fingerprint, translation_status)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
+           (source_id, run_id, url, title, text, published_at, fingerprint, content_fingerprint, translation_status)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
            ON CONFLICT (fingerprint) DO NOTHING RETURNING id""",
-        (source_id, run_id, item["url"], item["title"], body, item.get("published_at"), fingerprint),
+        (source_id, run_id, item["url"], item["title"], body, item.get("published_at"), fingerprint,
+         content_fingerprint),
     ).fetchone()
     if not return_id:
         return row is not None
@@ -1152,6 +1182,49 @@ def pending_relevant_materials(conn, rules_version: str, limit: int = 50) -> lis
     columns = ("material_id", "url", "title", "text", "published_at", "translation_status",
                "source_code", "source", "trust", "scope", "seller_impact")
     return [dict(zip(columns, row)) for row in rows]
+
+
+def _exact_duplicate_finding_id(conn, material_ids: list[int]) -> int | None:
+    rows = conn.execute(
+        "SELECT id, content_fingerprint FROM materials WHERE id = ANY(%s) ORDER BY id",
+        (material_ids,),
+    ).fetchall()
+    if len(rows) != len(set(material_ids)):
+        return None
+    fingerprints = {row[1] for row in rows}
+    if len(fingerprints) != 1 or None in fingerprints:
+        return None
+    fingerprint = next(iter(fingerprints))
+    matches = conn.execute(
+        """SELECT DISTINCT em.event_id
+           FROM event_materials em JOIN materials existing ON existing.id=em.material_id
+           WHERE existing.content_fingerprint=%s AND existing.id <> ALL(%s)
+           ORDER BY em.event_id""",
+        (fingerprint, material_ids),
+    ).fetchall()
+    return matches[0][0] if len(matches) == 1 else None
+
+
+def _manual_duplicate_matches_signal(conn, event_id: int, signal: dict[str, Any], platform: str) -> bool:
+    row = conn.execute(
+        "SELECT platform, topic, summary, recommended_action FROM events WHERE id=%s",
+        (event_id,),
+    ).fetchone()
+    return row == (platform, signal["topic"], signal["summary"], signal["recommended_action"])
+
+
+def _collision_safe_event_key(conn, key: str, material_ids: list[int], signal: dict[str, Any], platform: str) -> str:
+    rows = conn.execute(
+        "SELECT fingerprint FROM materials WHERE id = ANY(%s) ORDER BY fingerprint",
+        (material_ids,),
+    ).fetchall()
+    material_fingerprints = [row[0] for row in rows]
+    identity = json.dumps(
+        [material_fingerprints, platform, signal["topic"], signal["summary"], signal["recommended_action"]],
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return f"{key}|material:{suffix}"
 
 
 def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids: Iterable[int] = (), *,
@@ -1225,18 +1298,47 @@ def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids
         key = signal.get("event_key") or "|".join(
             [signal["platform"].strip().lower(), signal["topic"].strip().lower(), signal["summary"].strip().lower()]
         )
-        conflict_guard = " WHERE events.verification <> 'confirmed'" if reject_confirmed else ""
-        event = conn.execute(
-            """INSERT INTO events
-               (event_key, platform, topic, importance, seller_impact, summary, recommended_action, verification, effective_date)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (event_key) DO UPDATE SET updated_at = now()""" + conflict_guard + """
-               RETURNING id, (xmax = 0)""",
-            (key, platform, signal["topic"], signal["importance"], impact, signal["summary"], signal["recommended_action"], signal["verification"], signal.get("effective_date")),
-        ).fetchone()
-        if event is None:
-            raise ValueError("model event collides with confirmed event")
-        event_id, was_created = event
+        event_id = _exact_duplicate_finding_id(conn, ids)
+        if event_id is not None and not reject_confirmed:
+            if not _manual_duplicate_matches_signal(conn, event_id, signal, platform):
+                event_id = None
+            elif signal["verification"] == "confirmed":
+                conn.execute(
+                    "UPDATE events SET verification='confirmed', updated_at=now() "
+                    "WHERE id=%s AND verification='needs_check'",
+                    (event_id,),
+                )
+        was_created = False
+        if event_id is None:
+            event = conn.execute(
+                """INSERT INTO events
+                   (event_key, platform, topic, importance, seller_impact, summary, recommended_action, verification, effective_date)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (event_key) DO NOTHING RETURNING id""",
+                (key, platform, signal["topic"], signal["importance"], impact, signal["summary"],
+                 signal["recommended_action"], signal["verification"], signal.get("effective_date")),
+            ).fetchone()
+            if event is None:
+                if reject_confirmed:
+                    unconfirmed = conn.execute(
+                        "SELECT id FROM events WHERE event_key=%s AND events.verification <> 'confirmed'",
+                        (key,),
+                    ).fetchone()
+                    if unconfirmed is None:
+                        raise ValueError("model event collides with confirmed event")
+                safe_key = _collision_safe_event_key(conn, key, ids, signal, platform)
+                event = conn.execute(
+                    """INSERT INTO events
+                       (event_key, platform, topic, importance, seller_impact, summary, recommended_action, verification, effective_date)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (event_key) DO NOTHING RETURNING id""",
+                    (safe_key, platform, signal["topic"], signal["importance"], impact, signal["summary"],
+                     signal["recommended_action"], signal["verification"], signal.get("effective_date")),
+                ).fetchone()
+                if event is None:
+                    raise ValueError("Could not isolate conflicting model event")
+            event_id = event[0]
+            was_created = True
         created += int(was_created)
         for material_id in ids:
             row = conn.execute(

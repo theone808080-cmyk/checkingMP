@@ -51,8 +51,10 @@ function collect(node) { return [node, ...(node.children || []).flatMap(collect)
   assert.strictEqual(el('findings').hidden, false);
   assert.strictEqual(el('feed').hidden, true);
   const findingNodes = collect(el('findings-cards'));
-  const findingDetails = findingNodes.filter(node => node.tagName === 'DETAILS');
-  assert.strictEqual(findingDetails.length, 1, 'подробности находки раскрываются семантическим элементом');
+  const findingDetails = findingNodes.filter(node => node.className === 'finding-details');
+  assert.strictEqual(findingDetails.length, 1, 'внешние подробности находки раскрываются семантическим элементом');
+  const checksDisclosure = findingNodes.filter(node => node.className === 'finding-checks');
+  assert.strictEqual(checksDisclosure.length, 1, 'вложенная проверка не должна считаться внешними подробностями находки');
   const disclosure = findingDetails[0].children.find(node => node.tagName === 'SUMMARY');
   const detailBody = findingDetails[0].children.find(node => node.tagName !== 'SUMMARY');
   const previewText = collect(disclosure).map(node => String(node.textContent)).join(' ');

@@ -69,15 +69,27 @@ function collect(node) { return [node, ...(node.children || []).flatMap(collect)
   const visible = collect(el('findings-cards')).map(node => node.textContent).join(' ');
   assert.ok(visible.includes('Важность 5'), 'finding should show a numbered importance label');
   assert.ok(/риск|отрицател|негатив|ухудшен/i.test(visible), 'finding should show negative seller impact in Russian');
-  assert.ok(visible.includes('Классификатор: действие или риск для продавца'), 'classification should be shown separately from finding verification');
-  assert.ok(visible.includes('Релевантность: релевантно продавцу'), 'relevance verdict should be shown separately from classification');
-  assert.ok(visible.includes('Аудит сводки: без замечаний'), 'stored summary audit result should be visible');
-  assert.ok(visible.includes('Аудит рекомендации: требуется разбор'), 'stored recommendation audit result should be visible separately');
-  assert.ok(visible.includes('Классификатор: нет оценки'), 'missing classifier assessment must not look confirmed');
-  assert.ok(visible.includes('Релевантность: нет оценки'), 'missing relevance verdict must not look confirmed');
-  assert.ok(visible.includes('Аудит сводки: не проверено'), 'missing summary audit must not look successful');
-  assert.ok(visible.includes('Аудит рекомендации: не проверено'), 'missing recommendation audit must not look successful');
   const nodes = collect(el('findings-cards'));
+  const checks = nodes.filter(node => node.className === 'finding-checks');
+  assert.strictEqual(checks.length, 2, 'each finding should create its own collapsed Checks disclosure');
+  for (const disclosure of checks) {
+    assert.strictEqual(disclosure.tagName, 'details');
+    assert.strictEqual(disclosure.children[0].tagName, 'summary');
+    assert.strictEqual(disclosure.children[0].textContent, 'Проверки');
+  }
+  const firstChecks = collect(checks[0]).map(node => node.textContent).join(' ');
+  const secondChecks = collect(checks[1]).map(node => node.textContent).join(' ');
+  for (const label of ['Классификатор: действие или риск для продавца', 'Релевантность: релевантно продавцу',
+    'Проверка находки: нужно проверить', 'Аудит сводки: без замечаний', 'Аудит рекомендации: требуется разбор']) {
+    assert.ok(firstChecks.includes(label), `${label} should be nested inside the first Checks disclosure`);
+  }
+  for (const label of ['Классификатор: нет оценки', 'Релевантность: нет оценки',
+    'Проверка находки: нужно проверить', 'Аудит сводки: не проверено', 'Аудит рекомендации: не проверено']) {
+    assert.ok(secondChecks.includes(label), `${label} should be nested inside the second Checks disclosure`);
+  }
+  const attention = nodes.filter(node => node.className === 'finding-attention');
+  assert.strictEqual(attention.length, 1, 'only stored review or issue results should create a visible attention marker');
+  assert.strictEqual(attention[0].textContent, 'Есть замечание');
   assert.ok(nodes.some(node => node.className === 'importance-square importance-5'));
   assert.ok(nodes.some(node => node.href === 'https://example.org/source'));
   assert.strictEqual(el('findings').hidden, false);
