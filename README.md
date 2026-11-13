@@ -33,6 +33,9 @@
 | [`docs/superpowers/specs/2026-11-13-marketplace-news-classification/spec.md`](docs/superpowers/specs/2026-11-13-marketplace-news-classification/spec.md) | Утверждённая задача 14: отбор релевантных новостей маркетплейсов и влияние на продавца |
 | [`docs/superpowers/specs/2026-11-13-marketplace-news-classification/plan.md`](docs/superpowers/specs/2026-11-13-marketplace-news-classification/plan.md) | План реализации задачи 14 |
 | [`docs/superpowers/specs/2026-11-13-marketplace-news-classification/tasks.md`](docs/superpowers/specs/2026-11-13-marketplace-news-classification/tasks.md) | Чек-лист реализации и независимой проверки задачи 14 |
+| [`docs/superpowers/specs/2026-11-13-finding-quality-audit/spec.md`](docs/superpowers/specs/2026-11-13-finding-quality-audit/spec.md) | Утверждённая задача 13: теневой аудит точности сводок и рекомендаций |
+| [`docs/superpowers/specs/2026-11-13-finding-quality-audit/plan.md`](docs/superpowers/specs/2026-11-13-finding-quality-audit/plan.md) | План реализации задачи 13 |
+| [`docs/superpowers/specs/2026-11-13-finding-quality-audit/tasks.md`](docs/superpowers/specs/2026-11-13-finding-quality-audit/tasks.md) | Чек-лист выполнения и проверки задачи 13 |
 | `docs/superpowers/plans/2026-11-09-russian-translations.md` | План реализации задачи 2 |
 | `main.py` | Командный интерфейс цикла, ручной проверки, веб-сервера и уведомлений |
 | `config/` | Реестр источников и пример JSON для ручного импорта |
@@ -57,6 +60,7 @@
 | `config/sources.json` | Реестр публичных источников и уровня доверия |
 | `config/relevance-rules.json` | Версионируемые локальные правила оценки релевантности |
 | `judge/` | Локальная классификация, слепая разметка и метрики качества |
+| `quality_audit/` | Ручной теневой аудит фактов и условий в ИИ-сводках и рекомендациях |
 | `docs/superpowers/plans/2026-11-10-local-relevance-filter.md` | План реализации утверждённой задачи 5 |
 | `docs/superpowers/plans/2026-11-10-approved-tasks-6-10.md` | План реализации утверждённых задач 6–10 |
 | `docs/superpowers/plans/2026-11-09-source-discovery.md` | План реализации утверждённой задачи 3; код включён в `main` |
@@ -66,6 +70,8 @@
 Скопируйте `.env.example` в локальный `.env` только для локальной работы. Задайте `DATABASE_URL` с подключением к PostgreSQL, а при включённом веб-доступе — `WEB_BASIC_USER` и `WEB_BASIC_PASSWORD`. Не добавляйте секреты в Git.
 
 Для обработки используются `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_BASE_URL`, `OPENROUTER_TIMEOUT`, `OPENROUTER_BATCH_SIZE` и `OPENROUTER_MAX_TOKENS`. Модель по умолчанию — `openai/gpt-4.1-nano`; размер партии — 10, тайм-аут — 120 секунд, предел генерации — 2500 токенов. Базовый адрес — `https://openrouter.ai/api/v1`. API-ключ читает серверный процесс из переменной окружения. Пользователь вводит реальный `OPENROUTER_API_KEY` только в настройках окружения Coolify во время развёртывания; ключ не помещается в `.env.example`, Git или отчёты.
+
+Для ручного аудита качества находок используется отдельная переменная `FINDING_AUDIT_MODEL` без значения по умолчанию. Вызов использует тот же `OPENROUTER_API_KEY`; без модели или ключа команда не обращается к провайдеру. Каждая команда требует явно заданный предел выборки до 50 находок. Пилотный запуск может быть платным; не запускайте его без выбранной модели и решения владельца.
 
 Для личного Telegram Mini App и уведомлений используются `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` и `RADAR_MINIAPP_URL`. Первые две переменные нужны для проверки подписи Telegram и идентификатора владельца; все три — для уведомлений и настройки кнопки меню. `TELEGRAM_CHAT_ID` должен быть числовым идентификатором личного чата владельца, а `RADAR_MINIAPP_URL` — HTTPS-адресом страницы `/miniapp`. Значения вводятся владельцем непосредственно в окружение Coolify и не публикуются в Git, переписке или снимках экрана. Если какая-либо из трёх переменных уведомлений отсутствует, сбор и обработка продолжаются без рассылки.
 
@@ -160,6 +166,21 @@ python -m venv .venv
 ```
 
 Пример структуры для импорта находится в `config/reviewed-signals.example.json`. Человек проверяет сигналы до импорта; неподтверждённые выводы модели не считаются юридическим заключением.
+
+### Теневой аудит точности сводок и рекомендаций
+
+Задача 13 проверяет существующие находки вручную по ограниченной выборке. Команды не подключены к `cycle`, не меняют находки и не влияют на ленту. Сначала владелец задаёт `FINDING_AUDIT_MODEL` в защищённом окружении, затем сам запускает явное число проверок:
+
+```powershell
+.\.venv\Scripts\python.exe main.py audit-findings 10
+# Подставить значение run_id из JSON-отчёта вместо RUN_ID.
+# В work\finding-quality-labels-RUN_ID.json заполнить слепые метки, не меняя finding_id.
+.\.venv\Scripts\python.exe main.py prepare-finding-quality-labels RUN_ID
+.\.venv\Scripts\python.exe main.py import-finding-quality-labels RUN_ID work\finding-quality-labels-RUN_ID.json
+.\.venv\Scripts\python.exe main.py finding-quality-report RUN_ID
+```
+
+Команда аудита печатает JSON-отчёт и сохраняет машинные результаты в PostgreSQL. Слепая выгрузка содержит связанные тексты источников, сводку и рекомендацию, но не содержит машинные вердикты или замечания. Повторный аудит создаёт новый запуск и не заменяет историю. Стоимость показывается только при наличии значения в ответе провайдера; при отсутствии остаётся пустой. Ошибки проверяющей модели помечаются как `review` и не мешают штатной обработке.
 
 Для полного набора тестов задайте `TEST_DATABASE_URL` с отдельной тестовой PostgreSQL и запустите:
 

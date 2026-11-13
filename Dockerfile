@@ -16,5 +16,6 @@ COPY worker ./worker
 COPY watchdog ./watchdog
 COPY backup ./backup
 COPY source_discovery ./source_discovery
+COPY quality_audit ./quality_audit
 HEALTHCHECK --interval=2m --timeout=10s --start-period=10m --retries=2 CMD ["python", "main.py", "container-healthcheck"]
 CMD ["python", "main.py", "web"]
