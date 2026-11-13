@@ -200,6 +200,9 @@ CREATE TABLE IF NOT EXISTS relevance_assessments (
     classification TEXT NOT NULL CHECK (classification IN (
         'practical_change', 'seller_action_or_risk', 'industry_context', 'irrelevant', 'uncertain'
     )),
+    relevance TEXT NOT NULL DEFAULT 'uncertain' CHECK (relevance IN ('relevant', 'irrelevant', 'uncertain')),
+    topic TEXT NOT NULL DEFAULT '',
+    seller_impact TEXT NOT NULL DEFAULT 'unclear' CHECK (seller_impact IN ('positive', 'negative', 'mixed', 'neutral', 'unclear')),
     score SMALLINT NOT NULL CHECK (score BETWEEN 0 AND 100),
     rule_codes TEXT[] NOT NULL DEFAULT '{}',
     platforms TEXT[] NOT NULL DEFAULT '{}',
@@ -207,14 +210,49 @@ CREATE TABLE IF NOT EXISTS relevance_assessments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (material_id, rules_version)
 );
+ALTER TABLE relevance_assessments ADD COLUMN IF NOT EXISTS relevance TEXT NOT NULL DEFAULT 'uncertain';
+ALTER TABLE relevance_assessments ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT '';
+ALTER TABLE relevance_assessments ADD COLUMN IF NOT EXISTS seller_impact TEXT NOT NULL DEFAULT 'unclear';
 
 CREATE TABLE IF NOT EXISTS relevance_labels (
     material_id INTEGER PRIMARY KEY REFERENCES materials(id) ON DELETE CASCADE,
     label TEXT NOT NULL CHECK (label IN (
-        'practical_change', 'seller_action_or_risk', 'industry_context', 'irrelevant', 'uncertain'
+        'practical_change', 'seller_action_or_risk', 'industry_context', 'irrelevant', 'uncertain',
+        'relevant'
     )),
+    label_type TEXT NOT NULL DEFAULT 'classification' CHECK (label_type IN ('classification', 'relevance')),
+    platforms TEXT[] NOT NULL DEFAULT '{}',
+    seller_impact TEXT NOT NULL DEFAULT 'unclear' CHECK (seller_impact IN ('positive', 'negative', 'mixed', 'neutral', 'unclear')),
     labeled_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE relevance_labels ADD COLUMN IF NOT EXISTS platforms TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE relevance_labels ADD COLUMN IF NOT EXISTS seller_impact TEXT NOT NULL DEFAULT 'unclear';
+ALTER TABLE relevance_labels ADD COLUMN IF NOT EXISTS label_type TEXT NOT NULL DEFAULT 'classification';
+ALTER TABLE relevance_labels DROP CONSTRAINT IF EXISTS relevance_labels_label_check;
+ALTER TABLE relevance_labels ADD CONSTRAINT relevance_labels_label_check CHECK (label IN (
+    'practical_change', 'seller_action_or_risk', 'industry_context', 'irrelevant', 'uncertain', 'relevant'
+));
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relevance_assessments'::regclass AND conname = 'relevance_assessments_relevance_allowed_check') THEN
+        ALTER TABLE relevance_assessments ADD CONSTRAINT relevance_assessments_relevance_allowed_check
+            CHECK (relevance IN ('relevant', 'irrelevant', 'uncertain'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relevance_assessments'::regclass AND conname = 'relevance_assessments_seller_impact_allowed_check') THEN
+        ALTER TABLE relevance_assessments ADD CONSTRAINT relevance_assessments_seller_impact_allowed_check
+            CHECK (seller_impact IN ('positive', 'negative', 'mixed', 'neutral', 'unclear'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relevance_labels'::regclass AND conname = 'relevance_labels_seller_impact_allowed_check') THEN
+        ALTER TABLE relevance_labels ADD CONSTRAINT relevance_labels_seller_impact_allowed_check
+            CHECK (seller_impact IN ('positive', 'negative', 'mixed', 'neutral', 'unclear'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relevance_labels'::regclass AND conname = 'relevance_labels_label_type_allowed_check') THEN
+        ALTER TABLE relevance_labels ADD CONSTRAINT relevance_labels_label_type_allowed_check
+            CHECK (label_type IN ('classification', 'relevance'));
+    END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS events (
     id SERIAL PRIMARY KEY,
@@ -222,6 +260,7 @@ CREATE TABLE IF NOT EXISTS events (
     platform TEXT NOT NULL,
     topic TEXT NOT NULL,
     importance SMALLINT NOT NULL CONSTRAINT events_importance_check CHECK (importance BETWEEN 1 AND 5),
+    seller_impact TEXT NOT NULL DEFAULT 'unclear' CHECK (seller_impact IN ('positive', 'negative', 'mixed', 'neutral', 'unclear')),
     summary TEXT NOT NULL,
     recommended_action TEXT NOT NULL,
     verification TEXT NOT NULL CHECK (verification IN ('confirmed', 'needs_check')),
@@ -229,6 +268,16 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE events ADD COLUMN IF NOT EXISTS seller_impact TEXT NOT NULL DEFAULT 'unclear';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'events'::regclass AND conname = 'events_seller_impact_allowed_check') THEN
+        ALTER TABLE events ADD CONSTRAINT events_seller_impact_allowed_check
+            CHECK (seller_impact IN ('positive', 'negative', 'mixed', 'neutral', 'unclear'));
+    END IF;
+END
+$$;
 
 DO $$
 BEGIN

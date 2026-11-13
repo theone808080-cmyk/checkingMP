@@ -22,7 +22,7 @@ class DashboardTests(unittest.TestCase):
                 if "SELECT e.id, e.platform" in query:
                     self.event_query = query
                     self.event_params = params
-                    return Rows([(42, "Ozon", "rules", 5, "Changed", "Review", "needs_check", "https://example.org/source")])
+                    return Rows([(42, "Ozon", "rules", 5, "negative", "Changed", "Review", "needs_check", "https://example.org/source")])
                 if "SELECT DISTINCT platform" in query:
                     return Rows([("Ozon",)])
                 if "SELECT count(*) FROM sources WHERE" in query:
@@ -30,7 +30,8 @@ class DashboardTests(unittest.TestCase):
                 return Rows([])
 
         conn = Connection()
-        with patch.object(web.db, "health", return_value={"sources": 1, "materials": 1, "events": 1, "pending": 0}), \
+        with patch.dict(web.os.environ, {"RELEVANCE_FILTER_ENABLED": "0"}), \
+             patch.object(web.db, "health", return_value={"sources": 1, "materials": 1, "events": 1, "pending": 0}), \
              patch.object(web.db, "latest_backup_status", return_value={"last_status": "success", "last_success_size_bytes": 2048}):
             body = web.render(conn, {"importance": "5"})
         self.assertIn('name="importance"', body)
@@ -38,6 +39,7 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(f'value="{level}"', body)
         self.assertIn('importance-5', body)
         self.assertIn('Важность 5', body)
+        self.assertIn('Риск или дополнительные затраты', body)
         self.assertIn('https://example.org/source', body)
         self.assertIn('/api/findings/42/trace', body)
         self.assertIn("успешных копий пока нет", body)

@@ -272,6 +272,7 @@ def process(conn, *, cycle_id: int | None = None):
     relevance_failed = False
     relevance_items = []
     relevance_version = None
+    relevance_filter = db.relevance_filter_enabled()
     try:
         from judge.rules import rules_version
         relevance_version = rules_version()
@@ -280,8 +281,13 @@ def process(conn, *, cycle_id: int | None = None):
     except Exception:
         relevance_failed = True
         print("Local relevance filter failed; AI processing continues")
+        if relevance_filter:
+            raise RuntimeError("Local relevance filter unavailable; queue unchanged") from None
     _, _, _, _, limit, _ = settings()
-    batch = db.pending_materials(conn, limit)
+    if relevance_filter:
+        batch = db.pending_relevant_materials(conn, relevance_version, limit)
+    else:
+        batch = db.pending_materials(conn, limit)
     if not batch:
         return (0, 0, 0)
     source_context = {row[0]: (row[1], row[2]) for row in conn.execute(
@@ -289,7 +295,9 @@ def process(conn, *, cycle_id: int | None = None):
         (list({item["material_id"] for item in relevance_items + batch}),),
     ).fetchall()}
     relevance_finished = datetime.now().astimezone()
-    traced_relevance = relevance_items or (batch if relevance_failed else [])
+    traced_relevance = [item for item in relevance_items if item.get("status", "new") == "new"]
+    if not traced_relevance and relevance_failed:
+        traced_relevance = batch
     for item in traced_relevance:
         db.record_trace_attempt(
             conn, cycle_id=cycle_id, run_id=source_context.get(item["material_id"], (None, None))[1],
@@ -304,6 +312,29 @@ def process(conn, *, cycle_id: int | None = None):
     model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4.1-nano")[:120]
     try:
         payload = validate(infer(batch, cycle_id=cycle_id), batch)
+        impact_by_id = {}
+        for item in batch:
+            impact = item.get("seller_impact")
+            if impact not in ("positive", "negative", "mixed", "neutral", "unclear"):
+                try:
+                    from judge.rules import classify
+                    impact = classify(item)["seller_impact"]
+                except Exception:
+                    impact = "unclear"
+            impact_by_id[item["material_id"]] = impact
+        for signal in payload["signals"]:
+            impacts = {impact_by_id.get(material_id, "unclear") for material_id in signal["material_ids"]}
+            if "unclear" in impacts:
+                impact = "unclear"
+            elif "mixed" in impacts or ({"positive", "negative"} <= impacts):
+                impact = "mixed"
+            elif "negative" in impacts:
+                impact = "negative"
+            elif "positive" in impacts:
+                impact = "positive"
+            else:
+                impact = "neutral"
+            signal["seller_impact"] = impact
     except Exception:
         analysis_finished = datetime.now().astimezone()
         for item in batch:

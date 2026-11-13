@@ -19,13 +19,16 @@ def assess_pending(conn) -> int:
 
 
 def prepare_review(conn, limit: int = 100) -> dict:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Review pilot sample must be between 1 and 100")
     materials = db.relevance_review_sample(conn, limit)
     assessments = [
         {"material_id": material["material_id"], **classify(material)}
         for material in materials
     ]
     db.save_relevance_assessments(conn, assessments)
-    return make_blind_export(materials)
+    blind_materials = [{**material, "_include_seller_impact_labels": True} for material in materials]
+    return make_blind_export(blind_materials)
 
 
 def import_labels(conn, payload: object) -> int:

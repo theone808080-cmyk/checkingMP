@@ -6,3 +6,4 @@
 |---|---|---|---|
 | 11 | Диагностировать этап и безопасную категорию невалидного ответа OpenRouter без записи содержимого материалов | Реализовано; 199 тестов пройдены, 3 Docker-теста пропущены | [spec.md](docs/superpowers/specs/2026-11-12-openrouter-response-diagnostics/spec.md) |
 | 12 | Сделать ленту Mini App компактнее, а находки — информативнее и удобнее для чтения | Реализовано; 204 теста, 201 прошёл, 3 Docker smoke-теста пропущены | [spec.md](docs/superpowers/specs/2026-11-12-readable-feed-findings/spec.md) |
+| 14 | Отбирать новости маркетплейсов по релевантности продавцу и показывать направление влияния | Реализовано; независимый полный набор: 223 пройдено, 3 Docker smoke-теста пропущены | [spec.md](docs/superpowers/specs/2026-11-13-marketplace-news-classification/spec.md) |

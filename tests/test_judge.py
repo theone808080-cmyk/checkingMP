@@ -263,7 +263,7 @@ class RelevancePostgresTests(unittest.TestCase):
         self.conn.execute(psycopg.sql.SQL("SET search_path TO {}").format(psycopg.sql.Identifier(schema)))
         db.init_schema(self.conn)
         db.sync_sources(self.conn)
-        self.source_id = self.conn.execute("SELECT id FROM sources ORDER BY id LIMIT 1").fetchone()[0]
+        self.source_id = self.conn.execute("SELECT id FROM sources WHERE code = 'ozon_telegram'").fetchone()[0]
 
     def add_material(self, suffix, status="new"):
         inserted = db.add_material(self.conn, self.source_id, None, {
@@ -317,7 +317,7 @@ class RelevancePostgresTests(unittest.TestCase):
         self.assertNotIn("classification", sample[0])
         self.assertNotIn("score", sample[0])
         self.assertNotIn("rule_codes", sample[0])
-        db.save_relevance_labels(self.conn, [{"material_id": material_id, "label": "practical_change"}], "1")
+        db.save_relevance_labels(self.conn, [{"material_id": material_id, "label": "practical_change", "platforms": ["Ozon"]}], "1")
         self.assertEqual([], db.relevance_review_sample(self.conn, 10))
         with self.assertRaises(ValueError):
             db.save_relevance_labels(self.conn, [{"material_id": material_id + 100, "label": "irrelevant"}], "1")
@@ -328,6 +328,9 @@ class RelevancePostgresTests(unittest.TestCase):
             "title": f"Ozon changed seller tariffs labeled",
             "predicted": "practical_change",
             "label": "practical_change",
+            "metric_type": "classification",
+            "platforms": ["Ozon"],
+            "source_type": "telegram",
         }], evaluated)
 
 

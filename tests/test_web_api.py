@@ -123,14 +123,15 @@ class WebTests(unittest.TestCase):
     def test_findings_api_requires_auth_and_validates_combined_filters(self):
         basic = "Basic " + base64.b64encode(b"user:password").decode()
         self.assertEqual(self.request("GET", "/api/findings")[0], 401)
-        with patch.object(web.db, "feed_findings", return_value={"findings": [], "total": 0, "next_cursor": None}) as feed:
+        finding = {"id": 7, "platform": "Ozon", "importance": 4, "seller_impact": "negative"}
+        with patch.object(web.db, "feed_findings", return_value={"findings": [finding], "total": 1, "next_cursor": None}) as feed:
             status, body = self.request(
                 "GET",
                 "/api/findings?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official&limit=10",
                 basic,
             )
             self.assertEqual(status, 200)
-            self.assertEqual(json.loads(body)["findings"], [])
+            self.assertEqual(json.loads(body)["findings"], [finding])
             self.assertEqual(feed.call_args.args[1:], ("week", "ozon", 4, "log", "needs_check", "official", None, 10))
         for query in (
             "importance=6",

@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import psycopg
 
-from judge.constants import CLASSIFICATIONS
+from judge.constants import CLASSIFICATIONS, RELEVANCE_CLASSES, SELLER_IMPACTS
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 SOURCE_CONFIG = Path(__file__).parents[1] / "config" / "sources.json"
@@ -409,8 +409,10 @@ def normalize_event_platform(value: str) -> str:
 
 
 def _finding_filter_hash(period: str, platform: str, importance: int | None,
-                         topic: str | None, verification: str | None, trust: str | None) -> str:
-    encoded = json.dumps([period, platform, importance, topic, verification, trust], ensure_ascii=False, separators=(',', ':')).encode()
+                         topic: str | None, verification: str | None, trust: str | None,
+                         relevance_filter: bool = False, relevance_version: str | None = None) -> str:
+    encoded = json.dumps([period, platform, importance, topic, verification, trust,
+                          relevance_filter, relevance_version], ensure_ascii=False, separators=(',', ':')).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
@@ -499,6 +501,7 @@ def feed_materials(conn, period: str = 'all', platform: str = 'all', cursor: str
 def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return full-result counts for each finding filter, ignoring its own group."""
     filters = dict(filters or {})
+    filter_active = relevance_filter_active(conn)
     period = filters.get('period', 'all')
     platform = filters.get('platform', 'all')
     importance = filters.get('importance')
@@ -519,6 +522,13 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
     def where_for(exclude: str, extra: str | None = None, extra_params: tuple[Any, ...] = ()):
         clauses = []
         values: list[Any] = []
+        if filter_active:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM event_materials rem JOIN relevance_assessments ra "
+                "ON ra.material_id=rem.material_id WHERE rem.event_id=e.id "
+                "AND ra.rules_version=%s AND ra.relevance='relevant')"
+            )
+            values.append(active_relevance_version())
         if exclude != 'period' and period != 'all':
             midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
             start = " - INTERVAL '6 days'" if period == 'week' else ''
@@ -587,6 +597,37 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
     return result
 
 
+def relevance_filter_enabled() -> bool:
+    return os.getenv("RELEVANCE_FILTER_ENABLED", "0").strip().casefold() in ("1", "true", "yes", "on")
+
+
+def active_relevance_version() -> str:
+    from judge.rules import rules_version
+    return rules_version()
+
+
+def relevance_filter_active(conn) -> bool:
+    """Keep the feed unchanged until every collected material has a current assessment."""
+    if not relevance_filter_enabled():
+        return False
+    try:
+        version = active_relevance_version()
+        missing = conn.execute(
+            """SELECT EXISTS (
+                   SELECT 1 FROM materials m
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM relevance_assessments a
+                       WHERE a.material_id=m.id AND a.rules_version=%s
+                   )
+               )""",
+            (version,),
+        ).fetchone()[0]
+        return not missing
+    except Exception:
+        # A broken rules file or schema must not silently hide existing findings.
+        return False
+
+
 def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: int | None = None,
                   topic: str | None = None, verification: str | None = None, trust: str | None = None,
                   cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -603,11 +644,21 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
     if type(limit) is not int or limit < 1:
         raise ValueError('invalid page size')
     limit = min(limit, 20)
-    filter_hash = _finding_filter_hash(period, platform, importance, topic, verification, trust)
+    filter_enabled = relevance_filter_active(conn)
+    relevance_version = active_relevance_version() if filter_enabled else None
+    filter_hash = _finding_filter_hash(period, platform, importance, topic, verification, trust,
+                                       filter_enabled, relevance_version)
     position = _decode_findings_cursor(cursor, filter_hash) if cursor is not None else None
 
     conditions: list[str] = []
     params: list[Any] = []
+    if filter_enabled:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM event_materials rem JOIN relevance_assessments ra "
+            "ON ra.material_id=rem.material_id WHERE rem.event_id=e.id "
+            "AND ra.rules_version=%s AND ra.relevance='relevant')"
+        )
+        params.append(relevance_version)
     if period != 'all':
         start_offset = " - INTERVAL '6 days'" if period == 'week' else ''
         moscow_midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
@@ -639,7 +690,7 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
         params.append(trust)
     where = ' AND '.join(conditions) if conditions else 'true'
     filtered = (
-        "filtered AS MATERIALIZED (SELECT e.id, e.platform, e.topic, e.importance, e.summary, "
+        "filtered AS MATERIALIZED (SELECT e.id, e.platform, e.topic, e.importance, e.seller_impact, e.summary, "
         "e.recommended_action, e.verification, e.effective_date, e.updated_at, "
         "CASE WHEN lower(e.platform) ~ %s THEN 1 "
         "WHEN lower(e.platform) = ANY(%s) OR lower(e.platform) ~ %s OR bool_or(s.trust = 'regulator') THEN 2 ELSE 3 END AS specificity, "
@@ -680,7 +731,7 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
     has_more = len(page_ids) > limit
     page_ids = page_ids[:limit]
     rows = conn.execute(
-        """SELECT e.id, e.platform, e.topic, e.importance, e.summary, e.recommended_action,
+        """SELECT e.id, e.platform, e.topic, e.importance, e.seller_impact, e.summary, e.recommended_action,
                   e.verification, e.effective_date, e.updated_at,
                   CASE WHEN lower(e.platform) ~ %s THEN 1
                        WHEN lower(e.platform) = ANY(%s) OR lower(e.platform) ~ %s OR bool_or(s.trust = 'regulator') THEN 2 ELSE 3 END AS specificity,
@@ -696,7 +747,7 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
            ORDER BY page.ordinal""",
         (_PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN, page_ids),
     ).fetchall()
-    names = ('id', 'platform', 'topic', 'importance', 'summary', 'recommended_action',
+    names = ('id', 'platform', 'topic', 'importance', 'seller_impact', 'summary', 'recommended_action',
              'verification', 'effective_date', 'updated_at', 'specificity', 'sources')
     findings = [dict(zip(names, row)) for row in rows]
     next_cursor = _encode_findings_cursor(snapshot_id, offset + limit, filter_hash) if has_more else None
@@ -985,6 +1036,25 @@ def pending_materials(conn, limit: int = 50) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in rows]
 
 
+def pending_relevant_materials(conn, rules_version: str, limit: int = 50) -> list[dict[str, Any]]:
+    if not isinstance(rules_version, str) or not rules_version.strip():
+        raise ValueError("Invalid relevance rules version")
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("Invalid processing limit")
+    rows = conn.execute(
+        """SELECT m.id, m.url, m.title, m.text, m.published_at, m.translation_status,
+                  s.code, s.name, s.trust, s.scope, a.seller_impact
+           FROM materials m JOIN sources s ON s.id = m.source_id
+           JOIN relevance_assessments a ON a.material_id = m.id AND a.rules_version = %s
+           WHERE m.status = 'new' AND a.relevance = 'relevant'
+           ORDER BY m.published_at DESC NULLS LAST, m.id DESC LIMIT %s""",
+        (rules_version, limit),
+    ).fetchall()
+    columns = ("material_id", "url", "title", "text", "published_at", "translation_status",
+               "source_code", "source", "trust", "scope", "seller_impact")
+    return [dict(zip(columns, row)) for row in rows]
+
+
 def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids: Iterable[int] = (), *,
                    translations: Iterable[dict[str, Any]] = (), reject_confirmed: bool = False) -> tuple[int, int, int]:
     signals = list(signals)
@@ -1046,6 +1116,9 @@ def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids
             raise ValueError(f"В сигнале отсутствуют поля: {', '.join(sorted(missing))}")
         if type(signal["importance"]) is not int or not 1 <= signal["importance"] <= 5:
             raise ValueError("importance должен быть целым числом от 1 до 5")
+        impact = signal.get("seller_impact", "unclear")
+        if impact not in SELLER_IMPACTS:
+            raise ValueError("Invalid seller impact")
         platform = normalize_event_platform(signal["platform"])
         ids = signal["material_ids"]
         if not isinstance(ids, list) or not ids or not all(isinstance(value, int) for value in ids):
@@ -1056,11 +1129,11 @@ def import_signals(conn, signals: Iterable[dict[str, Any]], skipped_material_ids
         conflict_guard = " WHERE events.verification <> 'confirmed'" if reject_confirmed else ""
         event = conn.execute(
             """INSERT INTO events
-               (event_key, platform, topic, importance, summary, recommended_action, verification, effective_date)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               (event_key, platform, topic, importance, seller_impact, summary, recommended_action, verification, effective_date)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (event_key) DO UPDATE SET updated_at = now()""" + conflict_guard + """
                RETURNING id, (xmax = 0)""",
-            (key, platform, signal["topic"], signal["importance"], signal["summary"], signal["recommended_action"], signal["verification"], signal.get("effective_date")),
+            (key, platform, signal["topic"], signal["importance"], impact, signal["summary"], signal["recommended_action"], signal["verification"], signal.get("effective_date")),
         ).fetchone()
         if event is None:
             raise ValueError("model event collides with confirmed event")
@@ -1140,20 +1213,21 @@ def mark_backup_restore(conn, run_id: int, *, status: str, error_code: str | Non
     )
 
 
-def pending_relevance_materials(conn, rules_version: str) -> list[dict[str, Any]]:
+def pending_relevance_materials(conn, rules_version: str, limit: int = 200) -> list[dict[str, Any]]:
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("Invalid relevance assessment limit")
     rows = conn.execute(
-        """SELECT m.id, m.url, m.title, m.text, m.published_at,
+        """SELECT m.id, m.url, m.title, m.text, m.published_at, m.status,
                   s.code, s.name, s.trust, s.scope
            FROM materials m JOIN sources s ON s.id = m.source_id
-           WHERE m.status = 'new'
-             AND NOT EXISTS (
+           WHERE NOT EXISTS (
                  SELECT 1 FROM relevance_assessments a
                  WHERE a.material_id = m.id AND a.rules_version = %s
              )
-           ORDER BY m.published_at DESC NULLS LAST, m.id DESC""",
-        (rules_version,),
+           ORDER BY m.published_at DESC NULLS LAST, m.id DESC LIMIT %s""",
+        (rules_version, limit),
     ).fetchall()
-    columns = ("material_id", "url", "title", "text", "published_at", "source_code", "source", "trust", "scope")
+    columns = ("material_id", "url", "title", "text", "published_at", "status", "source_code", "source", "trust", "scope")
     return [dict(zip(columns, row)) for row in rows]
 
 
@@ -1170,6 +1244,16 @@ def save_relevance_assessments(conn, assessments: Iterable[dict[str, Any]]) -> i
         seen.add((material_id, version))
         if assessment.get("classification") not in CLASSIFICATIONS:
             raise ValueError("Invalid relevance classification")
+        relevance = assessment.get("relevance", {
+            "practical_change": "relevant", "seller_action_or_risk": "relevant",
+            "industry_context": "irrelevant", "irrelevant": "irrelevant", "uncertain": "uncertain",
+        }.get(assessment.get("classification")))
+        if relevance not in RELEVANCE_CLASSES:
+            raise ValueError("Invalid relevance result")
+        if assessment.get("seller_impact", "unclear") not in SELLER_IMPACTS:
+            raise ValueError("Invalid seller impact result")
+        if not isinstance(assessment.get("topic", ""), str):
+            raise ValueError("Invalid relevance topic")
         if type(assessment.get("score")) is not int or not 0 <= assessment["score"] <= 100:
             raise ValueError("Relevance score must be an integer from 0 to 100")
         for field in ("rule_codes", "platforms"):
@@ -1186,12 +1270,17 @@ def save_relevance_assessments(conn, assessments: Iterable[dict[str, Any]]) -> i
         for item in assessments:
             row = conn.execute(
                 """INSERT INTO relevance_assessments
-                   (material_id, rules_version, classification, score, rule_codes, platforms, explanation)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                   (material_id, rules_version, classification, relevance, topic, seller_impact,
+                    score, rule_codes, platforms, explanation)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (material_id, rules_version) DO NOTHING
                    RETURNING id""",
-                (item["material_id"], item["rules_version"], item["classification"], item["score"],
-                 item["rule_codes"], item["platforms"], item["explanation"][:300]),
+                (item["material_id"], item["rules_version"], item["classification"],
+                 item.get("relevance", {
+                     "practical_change": "relevant", "seller_action_or_risk": "relevant",
+                     "industry_context": "irrelevant", "irrelevant": "irrelevant", "uncertain": "uncertain",
+                 }.get(item["classification"])), item.get("topic", ""), item.get("seller_impact", "unclear"),
+                 item["score"], item["rule_codes"], item["platforms"], item["explanation"][:300]),
             ).fetchone()
             inserted += row is not None
     return inserted
@@ -1224,8 +1313,22 @@ def save_relevance_labels(conn, labels: Iterable[dict[str, Any]], rules_version:
     for item in labels:
         material_id = item.get("material_id")
         label = item.get("label")
-        if type(material_id) is not int or material_id < 1 or label not in CLASSIFICATIONS:
+        label_type = item.get(
+            "label_type",
+            "relevance" if label == "relevant" or (
+                label in ("irrelevant", "uncertain") and ("platforms" in item or "seller_impact" in item)
+            ) else "classification",
+        )
+        allowed_labels = CLASSIFICATIONS if label_type == "classification" else RELEVANCE_CLASSES
+        if (type(material_id) is not int or material_id < 1 or label_type not in ("classification", "relevance")
+                or label not in allowed_labels):
             raise ValueError("Invalid relevance label")
+        if not isinstance(item.get("platforms", []), list) or any(
+            not isinstance(value, str) or not value.strip() for value in item.get("platforms", [])
+        ):
+            raise ValueError("Invalid labeled platforms")
+        if item.get("seller_impact", "unclear") not in SELLER_IMPACTS:
+            raise ValueError("Invalid labeled seller impact")
         if material_id in seen:
             raise ValueError("Duplicate relevance label in batch")
         seen.add(material_id)
@@ -1248,22 +1351,31 @@ def save_relevance_labels(conn, labels: Iterable[dict[str, Any]], rules_version:
             raise ValueError("Labels include materials without a current relevance assessment")
         for item in labels:
             conn.execute(
-                """INSERT INTO relevance_labels (material_id, label)
-                   VALUES (%s, %s)
-                   ON CONFLICT (material_id) DO UPDATE SET label = EXCLUDED.label, labeled_at = now()""",
-                (item["material_id"], item["label"]),
+                """INSERT INTO relevance_labels (material_id, label, label_type, platforms, seller_impact)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (material_id) DO UPDATE SET label = EXCLUDED.label,
+                     label_type = EXCLUDED.label_type,
+                     platforms = EXCLUDED.platforms, seller_impact = EXCLUDED.seller_impact, labeled_at = now()""",
+                (item["material_id"], item["label"],
+                 item.get("label_type", "relevance" if item["label"] == "relevant"
+                          or (item["label"] in ("irrelevant", "uncertain")
+                              and ("platforms" in item or "seller_impact" in item)) else "classification"),
+                 item.get("platforms", []), item.get("seller_impact", "unclear")),
             )
     return len(labels)
 
 
 def relevance_evaluation_rows(conn, rules_version: str) -> list[dict[str, Any]]:
     rows = conn.execute(
-        """SELECT m.id, m.title, a.classification, l.label
+        """SELECT m.id, m.title,
+                  CASE WHEN l.label_type='relevance' THEN a.relevance ELSE a.classification END,
+                  l.label, l.label_type, l.platforms, s.kind
            FROM relevance_labels l
            JOIN relevance_assessments a ON a.material_id = l.material_id AND a.rules_version = %s
            JOIN materials m ON m.id = l.material_id
+           JOIN sources s ON s.id=m.source_id
            ORDER BY m.id""",
         (rules_version,),
     ).fetchall()
-    columns = ("material_id", "title", "predicted", "label")
+    columns = ("material_id", "title", "predicted", "label", "metric_type", "platforms", "source_type")
     return [dict(zip(columns, row)) for row in rows]

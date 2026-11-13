@@ -17,6 +17,7 @@
     .meta { color:var(--muted); font-size:12px; } .card h3 { font-size:16px; line-height:1.35; margin:6px 0; } .card p { white-space:pre-line; } a { color:var(--accent); font-weight:650; } .card a { display:inline-block; margin-top:8px; }
     input { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; color:var(--fg); background:var(--card); }
     .finding-level { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; } .importance-square { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border:1px solid #59656b55; border-radius:5px; color:#142027; }
+    .seller-impact { display:inline-flex; align-items:center; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:650; background:var(--bg); color:var(--fg); } .seller-impact-positive { color:#13734a; } .seller-impact-negative { color:#b42318; } .seller-impact-mixed { color:#8a5b00; }
     .finding-card { padding:10px 12px; } .finding-card summary { cursor:pointer; } .finding-card summary:focus-visible, .extra-filters summary:focus-visible { outline:3px solid var(--accent); outline-offset:2px; } .finding-card .finding-level { margin-bottom:3px; } .finding-card .importance-square { width:24px; height:24px; } .finding-card h3 { margin:4px 0; font-size:16px; line-height:1.32; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .extra-filters { margin:10px 0 6px; } .extra-filters > summary { display:inline-block; cursor:pointer; color:var(--accent); font-weight:700; padding:6px 0; } .finding-filter-groups { margin:8px 0; } .finding-active-filters { display:flex; flex-wrap:wrap; gap:6px; } .active-filter { max-width:100%; overflow-wrap:anywhere; border-radius:999px; padding:3px 8px; background:var(--card); color:var(--muted); border:1px solid var(--line); font-size:12px; }
     .importance-1 { background:#b9c1c7; } .importance-2 { background:#79b9e7; } .importance-3 { background:#f4d35e; } .importance-4 { background:#f4a261; } .importance-5 { background:#ef6c68; }
@@ -106,6 +107,8 @@
       disclosure.append(line);
     }
     disclosure.append(element('div', 'meta', `${item.platform || 'Область не указана'} · ${item.topic || 'Без темы'} · ${item.verification === 'confirmed' ? 'Подтверждено' : 'Нужно проверить'}`));
+    const impactLabels = {positive:'Выгода продавцу', negative:'Риск для продавца', mixed:'Смешанное влияние', neutral:'Нейтральное влияние', unclear:'Влияние неясно'};
+    if (impactLabels[item.seller_impact]) disclosure.append(element('span', `seller-impact seller-impact-${item.seller_impact}`, impactLabels[item.seller_impact]));
     const summary = item.summary || 'Находка без описания';
     const preview = summary.length > 140 ? `${summary.slice(0, 137).trimEnd()}…` : summary;
     disclosure.append(element('h3', '', preview));

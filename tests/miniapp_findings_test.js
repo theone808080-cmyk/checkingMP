@@ -31,7 +31,7 @@ async function fetch(url) {
   if (url.startsWith('/api/findings')) {
     return {ok:true, async json() { return {
       findings:[{
-        id:7, platform:'Ozon', topic:'logistics', importance:5, summary:'Changed delivery terms',
+        id:7, platform:'Ozon', topic:'logistics', importance:5, seller_impact:'negative', summary:'Changed delivery terms',
         recommended_action:'Review shipments', verification:'needs_check', effective_date:null,
         updated_at:'2026-11-09T09:00:00Z', specificity:1,
         sources:[{name:'Official Ozon',trust:'official',category:'ozon',url:'https://example.org/source',published_at:null,collected_at:'2026-11-09T09:00:00Z'}]
@@ -54,6 +54,7 @@ function collect(node) { return [node, ...(node.children || []).flatMap(collect)
   assert.ok(countsRequest.includes('period=all') && countsRequest.includes('platform=all'));
   const visible = collect(el('findings-cards')).map(node => node.textContent).join(' ');
   assert.ok(visible.includes('Важность 5'), 'finding should show a numbered importance label');
+  assert.ok(/риск|отрицател|негатив|ухудшен/i.test(visible), 'finding should show negative seller impact in Russian');
   const nodes = collect(el('findings-cards'));
   assert.ok(nodes.some(node => node.className === 'importance-square importance-5'));
   assert.ok(nodes.some(node => node.href === 'https://example.org/source'));
