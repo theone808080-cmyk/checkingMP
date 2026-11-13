@@ -248,11 +248,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.reject_auth()
                 return
             try:
-                params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=10)
+                params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=12)
                 if parsed.path == "/api/feed":
                     allowed = {"period", "platform", "cursor", "limit"}
                 elif parsed.path in ("/api/findings", "/api/findings/counts"):
-                    allowed = {"period", "platform", "importance", "topic", "verification", "source_type", "cursor", "limit"}
+                    allowed = {"period", "platform", "importance", "topic", "verification", "source_type",
+                               "seller_impact", "summary_audit", "recommendation_audit", "cursor", "limit"}
                 else:
                     allowed = set()
                 if any(key not in allowed or len(values) != 1 for key, values in params.items()):
@@ -271,6 +272,9 @@ class Handler(BaseHTTPRequestHandler):
                             "topic": params.get("topic", [None])[0],
                             "verification": params.get("verification", [None])[0],
                             "trust": params.get("source_type", [None])[0],
+                            "seller_impact": params.get("seller_impact", [None])[0],
+                            "summary_audit": params.get("summary_audit", [None])[0],
+                            "recommendation_audit": params.get("recommendation_audit", [None])[0],
                         }
                         if parsed.path == "/api/findings/counts":
                             if "cursor" in params or "limit" in params:
@@ -278,9 +282,12 @@ class Handler(BaseHTTPRequestHandler):
                             result = db.finding_filter_counts(conn, filters)
                         else:
                             result = db.feed_findings(
-                                conn, filters["period"], filters["platform"], filters["importance"],
-                                filters["topic"], filters["verification"], filters["trust"],
-                                params.get("cursor", [None])[0], limit,
+                                conn, period=filters["period"], platform=filters["platform"],
+                                importance=filters["importance"], topic=filters["topic"],
+                                verification=filters["verification"], trust=filters["trust"],
+                                cursor=params.get("cursor", [None])[0], limit=limit,
+                                seller_impact=filters["seller_impact"], summary_audit=filters["summary_audit"],
+                                recommendation_audit=filters["recommendation_audit"],
                             )
                     else:
                         result = db.feed_sources(conn)

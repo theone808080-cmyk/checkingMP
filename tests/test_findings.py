@@ -20,6 +20,9 @@ class FindingFilterValidationTests(unittest.TestCase):
             {"importance": "3"},
             {"verification": "maybe"},
             {"trust": "untrusted"},
+            {"seller_impact": "unknown"},
+            {"summary_audit": "unknown"},
+            {"recommendation_audit": "unknown"},
             {"limit": 0},
             {"limit": True},
             {"cursor": "not-a-cursor"},
@@ -36,6 +39,9 @@ class FindingFilterValidationTests(unittest.TestCase):
             {"importance": 6},
             {"verification": "unknown"},
             {"trust": "unknown"},
+            {"seller_impact": "unknown"},
+            {"summary_audit": "unknown"},
+            {"recommendation_audit": "unknown"},
         ):
             with self.subTest(filters=filters), self.assertRaises(ValueError):
                 db.finding_filter_counts(None, filters)
@@ -59,7 +65,10 @@ class FindingQueryTests(unittest.TestCase):
                 return Result()
 
         conn = Connection()
-        result = db.feed_findings(conn, period="today", platform="ozon", importance=4, topic="log%", verification="needs_check", trust="official")
+        result = db.feed_findings(
+            conn, period="today", platform="ozon", importance=4, topic="log%", verification="needs_check",
+            trust="official", seller_impact="negative", summary_audit="ok", recommendation_audit="review",
+        )
         self.assertEqual(result, {"findings": [], "total": 0, "next_cursor": None})
         self.assertEqual(len(conn.calls), 2)
         query, params = conn.calls[0]
@@ -67,12 +76,16 @@ class FindingQueryTests(unittest.TestCase):
         self.assertIn("EXISTS (SELECT 1 FROM event_materials tem", query)
         self.assertIn("e.importance = %s", query)
         self.assertIn("strpos(lower(e.topic), lower(%s)) > 0", query)
-        self.assertEqual(params[3:8], (["ozon"], db._FINDING_PLATFORM_PATTERNS["ozon"], 4, "log%", "needs_check"))
-        self.assertEqual(params[8], "official")
+        self.assertIn("COALESCE(ev.seller_impact,e.seller_impact) = %s", query)
+        self.assertIn("finding_quality_results", query)
+        self.assertEqual(params[4:9], (["ozon"], db._FINDING_PLATFORM_PATTERNS["ozon"], 4, "log%", "needs_check"))
+        self.assertEqual(params[9:13], ("official", "negative", "ok", "review"))
         self.assertNotIn("log%", query)
 
     def test_cursor_is_filter_bound_and_preserves_keyset(self):
-        fingerprint = db._finding_filter_hash("all", "ozon", 4, "log", "needs_check", "official")
+        fingerprint = db._finding_filter_hash(
+            "all", "ozon", 4, "log", "needs_check", "official", "negative", "ok", "review"
+        )
         snapshot_id = uuid.uuid4()
         cursor = db._encode_findings_cursor(snapshot_id, 20, fingerprint)
         self.assertEqual(db._decode_findings_cursor(cursor, fingerprint), (snapshot_id, 20))
@@ -99,9 +112,15 @@ class FindingQueryTests(unittest.TestCase):
         result = db.feed_findings(conn, limit=2)
         snapshot_query, _ = conn.calls[0]
         self.assertIn("INSERT INTO finding_snapshots", snapshot_query)
-        self.assertIn("array_agg(id ORDER BY specificity ASC, importance DESC, updated_at DESC, id DESC)", snapshot_query)
+        self.assertIn("array_agg(id ORDER BY usefulness_rank ASC, importance DESC, updated_at DESC, id DESC)", snapshot_query)
         self.assertEqual(result["total"], 3)
-        self.assertEqual(db._decode_findings_cursor(result["next_cursor"], db._finding_filter_hash("all", "all", None, None, None, None))[1], 2)
+        self.assertEqual(
+            db._decode_findings_cursor(
+                result["next_cursor"],
+                db._finding_filter_hash("all", "all", None, None, None, None, None, None, None),
+            )[1],
+            2,
+        )
 
 
 @unittest.skipUnless(os.environ.get("TEST_DATABASE_URL"), "TEST_DATABASE_URL is not configured")
@@ -136,21 +155,145 @@ class FindingPostgresTests(unittest.TestCase):
             self.conn.execute("INSERT INTO event_materials(event_id, material_id) VALUES (%s, %s)", (event_id, material_id))
         return event_id
 
-    def test_sorts_specific_findings_before_general_and_returns_all_sources(self):
+    def add_assessment(self, material_id, classification, *, relevance=None, seller_impact="neutral"):
+        relevance = relevance or {
+            "practical_change": "relevant", "seller_action_or_risk": "relevant",
+            "industry_context": "relevant", "irrelevant": "irrelevant", "uncertain": "uncertain",
+        }[classification]
+        self.conn.execute(
+            """INSERT INTO relevance_assessments
+               (material_id, rules_version, classification, relevance, topic, seller_impact, score, explanation)
+               VALUES (%s, %s, %s, %s, 'rules', %s, 80, 'test assessment')""",
+            (material_id, db.active_relevance_version(), classification, relevance, seller_impact),
+        )
+
+    def add_audit_result(self, finding_id, target, status, *, started_at):
+        run_id = self.conn.execute(
+            """INSERT INTO finding_quality_runs (rules_version, model, requested_limit, status, started_at, finished_at)
+               VALUES ('test', 'test', 1, 'success', %s, %s) RETURNING id""",
+            (started_at, started_at),
+        ).fetchone()[0]
+        self.conn.execute(
+            "INSERT INTO finding_quality_run_findings (run_id, finding_id) VALUES (%s, %s)",
+            (run_id, finding_id),
+        )
+        issues = '[]' if status == 'ok' else '[{"type":"unsupported_claim"}]'
+        self.conn.execute(
+            """INSERT INTO finding_quality_results (run_id, finding_id, target, status, issues, created_at)
+               VALUES (%s, %s, %s, %s, %s::jsonb, %s)""",
+            (run_id, finding_id, target, status, issues, started_at),
+        )
+
+    def test_orders_by_practical_usefulness_then_importance_freshness_and_id(self):
+        stamp = datetime.now(timezone.utc)
+        practical_low = self.add_material("ozon_telegram", "practical-low", stamp)
+        practical_high = self.add_material("ozon_telegram", "practical-high", stamp)
+        seller_action = self.add_material("ozon_telegram", "seller-action", stamp)
+        context = self.add_material("ozon_telegram", "context", stamp + timedelta(days=1))
+        uncertain = self.add_material("ozon_telegram", "uncertain", stamp + timedelta(days=2))
+        unassessed = self.add_material("ozon_telegram", "unassessed", stamp + timedelta(days=3))
+        ids = [
+            self.add_finding("practical-low", "Ozon", 3, stamp, [practical_low]),
+            self.add_finding("practical-high", "Ozon", 5, stamp, [practical_high]),
+            self.add_finding("seller-action", "Ozon", 5, stamp, [seller_action]),
+            self.add_finding("context", "Ozon", 5, stamp + timedelta(days=1), [context]),
+            self.add_finding("uncertain", "Ozon", 5, stamp + timedelta(days=2), [uncertain]),
+            self.add_finding("unassessed", "Ozon", 5, stamp + timedelta(days=3), [unassessed]),
+        ]
+        self.add_assessment(practical_low, "practical_change")
+        self.add_assessment(practical_high, "practical_change")
+        self.add_assessment(seller_action, "seller_action_or_risk")
+        self.add_assessment(context, "industry_context")
+        self.add_assessment(uncertain, "uncertain")
+
+        findings = db.feed_findings(self.conn, limit=20)["findings"]
+        self.assertEqual([item["id"] for item in findings], [ids[1], ids[0], ids[2], ids[3], ids[4], ids[5]])
+        self.assertEqual(findings[-1]["relevance"], "not_assessed")
+        self.assertEqual(findings[-1]["classification"], "not_assessed")
+
+    def test_returns_honest_assessment_and_latest_separate_audit_statuses(self):
+        stamp = datetime.now(timezone.utc)
+        assessed = self.add_material("ozon_telegram", "assessed", stamp)
+        unassessed = self.add_material("ozon_telegram", "unassessed-audit", stamp)
+        finding_id = self.add_finding("audited", "Ozon", 5, stamp, [assessed])
+        unassessed_id = self.add_finding("not-audited", "Ozon", 5, stamp, [unassessed])
+        self.add_assessment(assessed, "seller_action_or_risk", seller_impact="negative")
+        self.add_audit_result(finding_id, "summary", "issue", started_at=stamp)
+        self.add_audit_result(finding_id, "summary", "ok", started_at=stamp + timedelta(seconds=1))
+        self.add_audit_result(finding_id, "recommendation", "review", started_at=stamp + timedelta(seconds=2))
+
+        by_id = {item["id"]: item for item in db.feed_findings(self.conn)["findings"]}
+        self.assertEqual(by_id[finding_id]["classification"], "seller_action_or_risk")
+        self.assertEqual(by_id[finding_id]["relevance"], "relevant")
+        self.assertEqual(by_id[finding_id]["summary_audit"], "ok")
+        self.assertEqual(by_id[finding_id]["recommendation_audit"], "review")
+        self.assertEqual(by_id[unassessed_id]["classification"], "not_assessed")
+        self.assertEqual(by_id[unassessed_id]["summary_audit"], "not_checked")
+        self.assertEqual(by_id[unassessed_id]["recommendation_audit"], "not_checked")
+
+    def test_aggregates_disagreement_conservatively_and_filters_use_cursor_fingerprint(self):
+        stamp = datetime.now(timezone.utc)
+        practical = self.add_material("ozon_telegram", "mixed-practical", stamp)
+        irrelevant = self.add_material("ozon_telegram", "mixed-irrelevant", stamp)
+        negative = self.add_material("ozon_telegram", "negative", stamp)
+        negative_second = self.add_material("ozon_telegram", "negative-second", stamp - timedelta(seconds=1))
+        mixed_id = self.add_finding("mixed", "Ozon", 5, stamp, [practical, irrelevant])
+        negative_id = self.add_finding("negative", "Ozon", 4, stamp, [negative])
+        negative_second_id = self.add_finding("negative-second", "Ozon", 3, stamp - timedelta(seconds=1), [negative_second])
+        self.add_assessment(practical, "practical_change")
+        self.add_assessment(irrelevant, "irrelevant")
+        self.add_assessment(negative, "seller_action_or_risk", seller_impact="negative")
+        self.add_assessment(negative_second, "seller_action_or_risk", seller_impact="negative")
+        self.add_audit_result(negative_id, "summary", "ok", started_at=stamp)
+        self.add_audit_result(negative_second_id, "summary", "ok", started_at=stamp)
+
+        by_id = {item["id"]: item for item in db.feed_findings(self.conn)["findings"]}
+        self.assertEqual(by_id[mixed_id]["classification"], "uncertain")
+        self.assertEqual(by_id[mixed_id]["relevance"], "uncertain")
+        first = db.feed_findings(self.conn, seller_impact="negative", summary_audit="ok", limit=1)
+        self.assertEqual([item["id"] for item in first["findings"]], [negative_id])
+        self.assertIsNotNone(first["next_cursor"])
+        second = db.feed_findings(
+            self.conn, seller_impact="negative", summary_audit="ok", cursor=first["next_cursor"], limit=1
+        )
+        self.assertEqual([item["id"] for item in second["findings"]], [negative_second_id])
+        with self.assertRaises(ValueError):
+            db.feed_findings(self.conn, seller_impact="negative", summary_audit="issue", cursor=first["next_cursor"], limit=1)
+
+    def test_counts_include_impact_and_audit_status_groups(self):
+        stamp = datetime.now(timezone.utc)
+        negative = self.add_material("ozon_telegram", "counts-negative", stamp)
+        issue = self.add_material("ozon_telegram", "counts-issue", stamp)
+        negative_id = self.add_finding("counts-negative", "Ozon", 5, stamp, [negative])
+        issue_id = self.add_finding("counts-issue", "Ozon", 4, stamp, [issue])
+        self.conn.execute("UPDATE events SET seller_impact='negative' WHERE id=%s", (negative_id,))
+        self.conn.execute("UPDATE events SET seller_impact='negative' WHERE id=%s", (issue_id,))
+        self.add_audit_result(negative_id, "summary", "ok", started_at=stamp)
+        self.add_audit_result(issue_id, "summary", "issue", started_at=stamp)
+
+        counts = db.finding_filter_counts(self.conn, {"seller_impact": "negative", "summary_audit": "ok"})
+        self.assertEqual(counts["seller_impact"]["negative"], 1)
+        self.assertEqual(counts["summary_audit"]["ok"], 1)
+        self.assertEqual(counts["summary_audit"]["issue"], 1)
+        self.assertEqual(counts["recommendation_audit"]["not_checked"], 1)
+
+    def test_sorts_unassessed_findings_by_importance_freshness_and_id(self):
         stamp = datetime.now(timezone.utc)
         ozon = self.add_material("ozon_telegram", "ozon", stamp)
-        wb = self.add_material("wb_telegram", "wb", stamp)
-        regulator = self.add_material("rospotrebnadzor_federal", "regulator", stamp)
-        industry = self.add_material("retail_ru_telegram", "industry", stamp)
+        wb = self.add_material("wb_telegram", "wb", stamp - timedelta(seconds=3))
+        regulator = self.add_material("rospotrebnadzor_federal", "regulator", stamp - timedelta(seconds=1))
+        industry = self.add_material("retail_ru_telegram", "industry", stamp - timedelta(seconds=1))
         ozon_second_source = self.add_material("ozon_telegram", "ozon-second", stamp)
-        self.add_finding("ozon-low", "Ozon", 2, stamp, [ozon, ozon_second_source])
-        self.add_finding("wb-high", "Wildberries", 5, stamp, [wb])
-        self.add_finding("regulator", "industry", 5, stamp, [regulator])
-        self.add_finding("industry", "industry", 5, stamp, [industry])
+        low_id = self.add_finding("ozon-low", "Ozon", 2, stamp, [ozon, ozon_second_source])
+        wb_id = self.add_finding("wb-high", "Wildberries", 5, stamp - timedelta(seconds=3), [wb])
+        regulator_id = self.add_finding("regulator", "industry", 5, stamp - timedelta(seconds=1), [regulator])
+        industry_id = self.add_finding("industry", "industry", 5, stamp - timedelta(seconds=1), [industry])
 
         result = db.feed_findings(self.conn, limit=20)
-        self.assertEqual([item["summary"] for item in result["findings"]], ["wb-high", "ozon-low", "regulator", "industry"])
-        self.assertEqual({source["url"] for source in result["findings"][1]["sources"]},
+        self.assertEqual([item["id"] for item in result["findings"]], [industry_id, regulator_id, wb_id, low_id])
+        self.assertTrue(all(item["classification"] == "not_assessed" for item in result["findings"]))
+        self.assertTrue(all(item["relevance"] == "not_assessed" for item in result["findings"]))
+        self.assertEqual({source["url"] for source in result["findings"][-1]["sources"]},
                          {"https://example.org/ozon", "https://example.org/ozon-second"})
 
     def test_seller_impact_is_returned_without_changing_importance_filter(self):

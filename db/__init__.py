@@ -410,10 +410,42 @@ def normalize_event_platform(value: str) -> str:
 
 def _finding_filter_hash(period: str, platform: str, importance: int | None,
                          topic: str | None, verification: str | None, trust: str | None,
+                         seller_impact: str | None = None, summary_audit: str | None = None,
+                         recommendation_audit: str | None = None,
                          relevance_filter: bool = False, relevance_version: str | None = None) -> str:
     encoded = json.dumps([period, platform, importance, topic, verification, trust,
+                          seller_impact, summary_audit, recommendation_audit,
                           relevance_filter, relevance_version], ensure_ascii=False, separators=(',', ':')).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _finding_evaluation_ctes() -> str:
+    """Aggregate persisted classifier and audit outcomes without inventing missing results."""
+    return """relevance_by_event AS (
+             SELECT e.id AS event_id,
+                    CASE count(DISTINCT a.classification)
+                      WHEN 0 THEN 'not_assessed' WHEN 1 THEN min(a.classification) ELSE 'uncertain' END AS classification,
+                    CASE count(DISTINCT a.relevance)
+                      WHEN 0 THEN 'not_assessed' WHEN 1 THEN min(a.relevance) ELSE 'uncertain' END AS relevance,
+                    CASE count(DISTINCT a.seller_impact)
+                      WHEN 0 THEN NULL WHEN 1 THEN min(a.seller_impact) ELSE 'unclear' END AS seller_impact
+             FROM events e
+             LEFT JOIN event_materials em ON em.event_id=e.id
+             LEFT JOIN relevance_assessments a ON a.material_id=em.material_id AND a.rules_version=%s
+             GROUP BY e.id
+           ), latest_quality AS (
+             SELECT DISTINCT ON (finding_id, target) finding_id, target, status
+             FROM finding_quality_results
+             ORDER BY finding_id, target, created_at DESC, id DESC
+           ), quality_by_finding AS (
+             SELECT finding_id,
+                    max(status) FILTER (WHERE target='summary') AS summary_audit,
+                    max(status) FILTER (WHERE target='recommendation') AS recommendation_audit
+             FROM latest_quality GROUP BY finding_id
+           )"""
+
+
+_FINDING_AUDIT_STATUSES = ('ok', 'review', 'issue', 'not_checked')
 
 
 def _decode_findings_cursor(cursor: str, filter_hash: str) -> tuple[uuid.UUID, int]:
@@ -508,6 +540,9 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
     topic = filters.get('topic')
     verification = filters.get('verification')
     trust = filters.get('trust')
+    seller_impact = filters.get('seller_impact')
+    summary_audit = filters.get('summary_audit')
+    recommendation_audit = filters.get('recommendation_audit')
     if period not in ('all', 'today', 'week') or platform not in ('all', *_FINDING_PLATFORMS):
         raise ValueError('invalid finding filter')
     if importance is not None and (type(importance) is not int or not 1 <= importance <= 5):
@@ -518,6 +553,12 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
         raise ValueError('invalid verification')
     if trust is not None and trust not in ('official', 'regulator', 'industry'):
         raise ValueError('invalid source trust')
+    if seller_impact is not None and seller_impact not in SELLER_IMPACTS:
+        raise ValueError('invalid seller impact')
+    if summary_audit is not None and summary_audit not in _FINDING_AUDIT_STATUSES:
+        raise ValueError('invalid summary audit status')
+    if recommendation_audit is not None and recommendation_audit not in _FINDING_AUDIT_STATUSES:
+        raise ValueError('invalid recommendation audit status')
 
     def where_for(exclude: str, extra: str | None = None, extra_params: tuple[Any, ...] = ()):
         clauses = []
@@ -550,6 +591,12 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
         if exclude != 'source_type' and trust is not None:
             clauses.append("EXISTS (SELECT 1 FROM event_materials tem JOIN materials tm ON tm.id=tem.material_id JOIN sources ts ON ts.id=tm.source_id WHERE tem.event_id=e.id AND ts.trust=%s)")
             values.append(trust)
+        if exclude != 'seller_impact' and seller_impact is not None:
+            clauses.append('COALESCE(ev.seller_impact,e.seller_impact)=%s'); values.append(seller_impact)
+        if exclude != 'summary_audit' and summary_audit is not None:
+            clauses.append("COALESCE(qa.summary_audit, 'not_checked')=%s"); values.append(summary_audit)
+        if exclude != 'recommendation_audit' and recommendation_audit is not None:
+            clauses.append("COALESCE(qa.recommendation_audit, 'not_checked')=%s"); values.append(recommendation_audit)
         if extra:
             clauses.append(extra); values.extend(extra_params)
         return (' AND '.join(clauses) if clauses else 'true'), tuple(values)
@@ -557,9 +604,12 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
     def count(exclude: str, extra: str | None = None, args: tuple[Any, ...] = ()):
         where, values = where_for(exclude, extra, args)
         return conn.execute(
-            'SELECT count(DISTINCT e.id) FROM events e JOIN event_materials em ON em.event_id=e.id '
+            'WITH ' + _finding_evaluation_ctes() + ' SELECT count(DISTINCT e.id) FROM events e '
+            'LEFT JOIN relevance_by_event ev ON ev.event_id=e.id '
+            'LEFT JOIN quality_by_finding qa ON qa.finding_id=e.id '
+            'JOIN event_materials em ON em.event_id=e.id '
             'JOIN materials m ON m.id=em.material_id JOIN sources s ON s.id=m.source_id WHERE ' + where,
-            values,
+            (active_relevance_version(),) + values,
         ).fetchone()[0]
 
     result: dict[str, Any] = {}
@@ -584,14 +634,25 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
     result['source_type'] = {'all': count('source_type')}
     for value in ('official', 'regulator', 'industry'):
         result['source_type'][value] = count('source_type', 's.trust=%s', (value,))
+    result['seller_impact'] = {'all': count('seller_impact')}
+    for value in sorted(SELLER_IMPACTS):
+        result['seller_impact'][value] = count('seller_impact', 'COALESCE(ev.seller_impact,e.seller_impact)=%s', (value,))
+    for group, column in (('summary_audit', 'qa.summary_audit'),
+                          ('recommendation_audit', 'qa.recommendation_audit')):
+        result[group] = {'all': count(group)}
+        for value in _FINDING_AUDIT_STATUSES:
+            result[group][value] = count(group, f"COALESCE({column}, 'not_checked')=%s", (value,))
     result['topic_status'] = {'verification': {'all': count('topic_status')}}
     for value in ('confirmed', 'needs_check'):
         result['topic_status']['verification'][value] = count('topic_status', 'e.verification=%s', (value,))
     where, values = where_for('topic_status')
     topics = conn.execute(
-        'SELECT e.topic, count(DISTINCT e.id) FROM events e JOIN event_materials em ON em.event_id=e.id '
+        'WITH ' + _finding_evaluation_ctes() + ' SELECT e.topic, count(DISTINCT e.id) FROM events e '
+        'LEFT JOIN relevance_by_event ev ON ev.event_id=e.id '
+        'LEFT JOIN quality_by_finding qa ON qa.finding_id=e.id '
+        'JOIN event_materials em ON em.event_id=e.id '
         'JOIN materials m ON m.id=em.material_id JOIN sources s ON s.id=m.source_id WHERE ' + where +
-        ' GROUP BY e.topic ORDER BY lower(e.topic), e.topic', values,
+        ' GROUP BY e.topic ORDER BY lower(e.topic), e.topic', (active_relevance_version(),) + values,
     ).fetchall()
     result['topic_status']['topics'] = [{'value': row[0], 'count': row[1]} for row in topics]
     return result
@@ -630,7 +691,8 @@ def relevance_filter_active(conn) -> bool:
 
 def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: int | None = None,
                   topic: str | None = None, verification: str | None = None, trust: str | None = None,
-                  cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+                  cursor: str | None = None, limit: int = 20, *, seller_impact: str | None = None,
+                  summary_audit: str | None = None, recommendation_audit: str | None = None) -> dict[str, Any]:
     if period not in ('all', 'today', 'week') or platform not in ('all', *_FINDING_PLATFORMS):
         raise ValueError('invalid finding filter')
     if importance is not None and (type(importance) is not int or not 1 <= importance <= 5):
@@ -641,12 +703,19 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
         raise ValueError('invalid verification')
     if trust is not None and trust not in ('official', 'regulator', 'industry'):
         raise ValueError('invalid source trust')
+    if seller_impact is not None and seller_impact not in SELLER_IMPACTS:
+        raise ValueError('invalid seller impact')
+    if summary_audit is not None and summary_audit not in _FINDING_AUDIT_STATUSES:
+        raise ValueError('invalid summary audit status')
+    if recommendation_audit is not None and recommendation_audit not in _FINDING_AUDIT_STATUSES:
+        raise ValueError('invalid recommendation audit status')
     if type(limit) is not int or limit < 1:
         raise ValueError('invalid page size')
     limit = min(limit, 20)
     filter_enabled = relevance_filter_active(conn)
     relevance_version = active_relevance_version() if filter_enabled else None
     filter_hash = _finding_filter_hash(period, platform, importance, topic, verification, trust,
+                                       seller_impact, summary_audit, recommendation_audit,
                                        filter_enabled, relevance_version)
     position = _decode_findings_cursor(cursor, filter_hash) if cursor is not None else None
 
@@ -688,28 +757,48 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
             'JOIN sources ts ON ts.id = tm.source_id WHERE tem.event_id = e.id AND ts.trust = %s)'
         )
         params.append(trust)
+    if seller_impact is not None:
+        conditions.append('COALESCE(ev.seller_impact,e.seller_impact) = %s')
+        params.append(seller_impact)
+    if summary_audit is not None:
+        conditions.append("COALESCE(qa.summary_audit, 'not_checked') = %s")
+        params.append(summary_audit)
+    if recommendation_audit is not None:
+        conditions.append("COALESCE(qa.recommendation_audit, 'not_checked') = %s")
+        params.append(recommendation_audit)
     where = ' AND '.join(conditions) if conditions else 'true'
     filtered = (
-        "filtered AS MATERIALIZED (SELECT e.id, e.platform, e.topic, e.importance, e.seller_impact, e.summary, "
+        "filtered AS MATERIALIZED (SELECT e.id, e.platform, e.topic, e.importance, "
+        "COALESCE(ev.seller_impact,e.seller_impact) AS seller_impact, e.summary, "
         "e.recommended_action, e.verification, e.effective_date, e.updated_at, "
         "CASE WHEN lower(e.platform) ~ %s THEN 1 "
         "WHEN lower(e.platform) = ANY(%s) OR lower(e.platform) ~ %s OR bool_or(s.trust = 'regulator') THEN 2 ELSE 3 END AS specificity, "
+        "COALESCE(ev.classification, 'not_assessed') AS classification, "
+        "COALESCE(ev.relevance, 'not_assessed') AS relevance, "
+        "COALESCE(qa.summary_audit, 'not_checked') AS summary_audit, "
+        "COALESCE(qa.recommendation_audit, 'not_checked') AS recommendation_audit, "
+        "CASE COALESCE(ev.classification, 'not_assessed') "
+        "WHEN 'practical_change' THEN 1 WHEN 'seller_action_or_risk' THEN 2 "
+        "WHEN 'industry_context' THEN 3 WHEN 'uncertain' THEN 4 ELSE 5 END AS usefulness_rank, "
         "json_agg(json_build_object('name', s.name, 'trust', s.trust, 'category', s.category, 'url', m.url, "
         "'published_at', m.published_at, 'collected_at', m.collected_at) "
         "ORDER BY COALESCE(m.published_at, m.collected_at) DESC, m.id DESC) AS sources "
         "FROM events e JOIN event_materials em ON em.event_id = e.id "
         "JOIN materials m ON m.id = em.material_id JOIN sources s ON s.id = m.source_id "
-        "WHERE " + where + " GROUP BY e.id) "
+        "LEFT JOIN relevance_by_event ev ON ev.event_id=e.id "
+        "LEFT JOIN quality_by_finding qa ON qa.finding_id=e.id "
+        "WHERE " + where + " GROUP BY e.id, ev.classification, ev.relevance, ev.seller_impact, qa.summary_audit, qa.recommendation_audit) "
     )
     general_platforms = ['all', 'cross_platform', 'межплощадочная', 'все маркетплейсы']
-    base_params = [_PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN] + params
+    base_params = [active_relevance_version(), _PLATFORM_SPECIFIC_PATTERN, general_platforms,
+                   _PLATFORM_CROSS_PATTERN] + params
     if position is None:
         snapshot_id = uuid.uuid4()
         event_ids = conn.execute(
-            "WITH expired AS (DELETE FROM finding_snapshots WHERE created_at < now() - INTERVAL '30 minutes'), " +
+            "WITH " + _finding_evaluation_ctes() + ", expired AS (DELETE FROM finding_snapshots WHERE created_at < now() - INTERVAL '30 minutes'), " +
             filtered +
             ", snapshot AS (INSERT INTO finding_snapshots (id, filters_hash, event_ids) "
-            "SELECT %s, %s, COALESCE(array_agg(id ORDER BY specificity ASC, importance DESC, updated_at DESC, id DESC), "
+            "SELECT %s, %s, COALESCE(array_agg(id ORDER BY usefulness_rank ASC, importance DESC, updated_at DESC, id DESC), "
             "ARRAY[]::integer[]) FROM filtered RETURNING event_ids) SELECT event_ids FROM snapshot",
             tuple(base_params + [snapshot_id, filter_hash]),
         ).fetchone()[0]
@@ -731,10 +820,16 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
     has_more = len(page_ids) > limit
     page_ids = page_ids[:limit]
     rows = conn.execute(
-        """SELECT e.id, e.platform, e.topic, e.importance, e.seller_impact, e.summary, e.recommended_action,
+        "WITH " + _finding_evaluation_ctes() + " "
+        """SELECT e.id, e.platform, e.topic, e.importance, COALESCE(ev.seller_impact,e.seller_impact) AS seller_impact,
+                  e.summary, e.recommended_action,
                   e.verification, e.effective_date, e.updated_at,
                   CASE WHEN lower(e.platform) ~ %s THEN 1
                        WHEN lower(e.platform) = ANY(%s) OR lower(e.platform) ~ %s OR bool_or(s.trust = 'regulator') THEN 2 ELSE 3 END AS specificity,
+                  COALESCE(ev.classification, 'not_assessed') AS classification,
+                  COALESCE(ev.relevance, 'not_assessed') AS relevance,
+                  COALESCE(qa.summary_audit, 'not_checked') AS summary_audit,
+                  COALESCE(qa.recommendation_audit, 'not_checked') AS recommendation_audit,
                   json_agg(json_build_object('name', s.name, 'trust', s.trust, 'category', s.category, 'url', m.url,
                     'published_at', m.published_at, 'collected_at', m.collected_at)
                     ORDER BY COALESCE(m.published_at, m.collected_at) DESC, m.id DESC) AS sources
@@ -743,12 +838,16 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
            JOIN event_materials em ON em.event_id = e.id
            JOIN materials m ON m.id = em.material_id
            JOIN sources s ON s.id = m.source_id
-           GROUP BY e.id, page.ordinal
-           ORDER BY page.ordinal""",
-        (_PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN, page_ids),
+            LEFT JOIN relevance_by_event ev ON ev.event_id=e.id
+            LEFT JOIN quality_by_finding qa ON qa.finding_id=e.id
+            GROUP BY e.id, page.ordinal, ev.classification, ev.relevance, ev.seller_impact,
+                     qa.summary_audit, qa.recommendation_audit
+            ORDER BY page.ordinal""",
+         (active_relevance_version(), _PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN, page_ids),
     ).fetchall()
     names = ('id', 'platform', 'topic', 'importance', 'seller_impact', 'summary', 'recommended_action',
-             'verification', 'effective_date', 'updated_at', 'specificity', 'sources')
+             'verification', 'effective_date', 'updated_at', 'specificity', 'classification', 'relevance',
+             'summary_audit', 'recommendation_audit', 'sources')
     findings = [dict(zip(names, row)) for row in rows]
     next_cursor = _encode_findings_cursor(snapshot_id, offset + limit, filter_hash) if has_more else None
     return {'findings': findings, 'total': total, 'next_cursor': next_cursor}

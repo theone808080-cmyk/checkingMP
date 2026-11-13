@@ -12,6 +12,8 @@
 
 Задача 14 реализована в ветке `feature/task-14-marketplace-classifier`: локальные версионируемые правила отделяют релевантные новости от общего шума и оценивают влияние на продавца; Mini App показывает влияние отдельно от важности 1–5. Отчёт качества включает точность, полноту, F1 и срезы по площадкам и типам источников. Фильтр выключен по умолчанию и скрывает нерелевантные находки только после полного пересчёта материалов текущей версией правил. Независимый полный набор на отдельной PostgreSQL 17: 226 тестов, 223 прошли, 3 Docker smoke-теста пропущены. Push и развёртывание не выполнялись.
 
+Задача 15 реализована в изолированной ветке: лента ранжирует новости по практической пользе для продавца, прячет дополнительные фильтры в компактную панель и раздельно показывает классификацию, релевантность, проверку находки и реальные результаты аудита сводки и рекомендации. Отсутствующие оценки показаны явно. Независимый полный набор на изолированной PostgreSQL 17: 248 тестов, 245 прошли, 3 пропущены, ошибок нет. Спецификация, план и чек-лист: [`docs/superpowers/specs/2026-11-13-useful-marketplace-feed/`](docs/superpowers/specs/2026-11-13-useful-marketplace-feed/). Push, слияние и развёртывание не выполнялись.
+
 
 
 ## Состав проекта
@@ -36,6 +38,9 @@
 | [`docs/superpowers/specs/2026-11-13-finding-quality-audit/spec.md`](docs/superpowers/specs/2026-11-13-finding-quality-audit/spec.md) | Утверждённая задача 13: теневой аудит точности сводок и рекомендаций |
 | [`docs/superpowers/specs/2026-11-13-finding-quality-audit/plan.md`](docs/superpowers/specs/2026-11-13-finding-quality-audit/plan.md) | План реализации задачи 13 |
 | [`docs/superpowers/specs/2026-11-13-finding-quality-audit/tasks.md`](docs/superpowers/specs/2026-11-13-finding-quality-audit/tasks.md) | Чек-лист выполнения и проверки задачи 13 |
+| [`docs/superpowers/specs/2026-11-13-useful-marketplace-feed/spec.md`](docs/superpowers/specs/2026-11-13-useful-marketplace-feed/spec.md) | Утверждённая задача 15: полезная лента новостей маркетплейсов |
+| [`docs/superpowers/specs/2026-11-13-useful-marketplace-feed/plan.md`](docs/superpowers/specs/2026-11-13-useful-marketplace-feed/plan.md) | План реализации задачи 15 |
+| [`docs/superpowers/specs/2026-11-13-useful-marketplace-feed/tasks.md`](docs/superpowers/specs/2026-11-13-useful-marketplace-feed/tasks.md) | Чек-лист тестирования и выполнения задачи 15 |
 | `docs/superpowers/plans/2026-11-09-russian-translations.md` | План реализации задачи 2 |
 | `main.py` | Командный интерфейс цикла, ручной проверки, веб-сервера и уведомлений |
 | `config/` | Реестр источников и пример JSON для ручного импорта |
