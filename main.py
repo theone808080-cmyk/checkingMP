@@ -18,6 +18,10 @@ from watchdog.service import Settings as WatchdogSettings, container_healthcheck
 from judge.main import import_labels, prepare_review as prepare_judge_sample, report as relevance_report
 from source_discovery.main import discover_sources as run_source_discovery
 from backup.service import Settings as BackupSettings, backup_once, verify_latest
+from quality_audit.service import import_labels as import_quality_labels
+from quality_audit.service import prepare_labels as prepare_quality_labels
+from quality_audit.service import report as quality_report
+from quality_audit.service import run_audit as run_quality_audit
 
 WORK = Path(__file__).with_name("work")
 
@@ -91,6 +95,63 @@ def show_judge_report() -> None:
         db.init_schema(conn)
         result = relevance_report(conn)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def audit_findings() -> None:
+    if len(sys.argv) != 3:
+        sys.exit("Использование: python main.py audit-findings <limit 1..50>")
+    try:
+        limit = int(sys.argv[2])
+    except ValueError:
+        sys.exit("limit должен быть целым числом от 1 до 50")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        run_id = run_quality_audit(conn, limit=limit)
+        result = quality_report(conn, run_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=json_default))
+
+
+def prepare_finding_quality_labels() -> None:
+    if len(sys.argv) != 3:
+        sys.exit("Использование: python main.py prepare-finding-quality-labels <run_id>")
+    try:
+        run_id = int(sys.argv[2])
+    except ValueError:
+        sys.exit("run_id должен быть положительным целым числом")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        payload = prepare_quality_labels(conn, run_id)
+    WORK.mkdir(exist_ok=True)
+    target = WORK / f"finding-quality-labels-{run_id}.json"
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
+    print(f"Подготовлена слепая разметка {len(payload['findings'])} находок: {target}")
+
+
+def import_finding_quality_labels() -> None:
+    if len(sys.argv) != 4:
+        sys.exit("Использование: python main.py import-finding-quality-labels <run_id> <файл>")
+    try:
+        run_id = int(sys.argv[2])
+    except ValueError:
+        sys.exit("run_id должен быть положительным целым числом")
+    payload = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+    with db.connect() as conn:
+        db.init_schema(conn)
+        count = import_quality_labels(conn, run_id, payload)
+    print(f"Сохранено слепых ручных меток: {count}")
+
+
+def show_finding_quality_report() -> None:
+    if len(sys.argv) != 3:
+        sys.exit("Использование: python main.py finding-quality-report <run_id>")
+    try:
+        run_id = int(sys.argv[2])
+    except ValueError:
+        sys.exit("run_id должен быть положительным целым числом")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        result = quality_report(conn, run_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=json_default))
 
 
 def import_review(path: str) -> None:
@@ -241,6 +302,10 @@ COMMANDS = {
     "prepare-judge-review": prepare_judge_review,
     "import-judge-labels": import_judge_labels,
     "judge-report": show_judge_report,
+    "audit-findings": audit_findings,
+    "prepare-finding-quality-labels": prepare_finding_quality_labels,
+    "import-finding-quality-labels": import_finding_quality_labels,
+    "finding-quality-report": show_finding_quality_report,
     "web": web,
     "health": show_health,
     "telegram-set-menu": telegram.set_menu,
@@ -254,7 +319,7 @@ COMMANDS = {
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | prepare-judge-review [limit] | import-judge-labels <файл> | judge-report | discover-sources | backup | verify-backup | web | health | watchdog | container-healthcheck")
+        sys.exit("Использование: python main.py cycle | collect | process | prepare-review | import-review <файл> | prepare-judge-review [limit] | import-judge-labels <файл> | judge-report | audit-findings <limit> | prepare-finding-quality-labels <run_id> | import-finding-quality-labels <run_id> <файл> | finding-quality-report <run_id> | discover-sources | backup | verify-backup | web | health | watchdog | container-healthcheck")
     command = sys.argv[1]
     if command == "import-review":
         if len(sys.argv) != 3:
@@ -272,6 +337,8 @@ if __name__ == "__main__":
         except ValueError:
             sys.exit("limit должен быть целым числом от 1 до 1000")
         prepare_judge_review(limit)
+    elif command in {"audit-findings", "prepare-finding-quality-labels", "finding-quality-report", "import-finding-quality-labels"}:
+        COMMANDS[command]()
     elif command in COMMANDS:
         COMMANDS[command]()
     else:

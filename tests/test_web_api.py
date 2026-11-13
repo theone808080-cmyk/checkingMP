@@ -127,15 +127,22 @@ class WebTests(unittest.TestCase):
         with patch.object(web.db, "feed_findings", return_value={"findings": [finding], "total": 1, "next_cursor": None}) as feed:
             status, body = self.request(
                 "GET",
-                "/api/findings?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official&limit=10",
+                "/api/findings?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official&seller_impact=negative&summary_audit=ok&recommendation_audit=review&limit=10",
                 basic,
             )
             self.assertEqual(status, 200)
             self.assertEqual(json.loads(body)["findings"], [finding])
-            self.assertEqual(feed.call_args.args[1:], ("week", "ozon", 4, "log", "needs_check", "official", None, 10))
+            feed.assert_called_once_with(
+                self.conn, period="week", platform="ozon", importance=4, topic="log", verification="needs_check",
+                trust="official", seller_impact="negative", summary_audit="ok", recommendation_audit="review",
+                cursor=None, limit=10,
+            )
         for query in (
             "importance=6",
             "verification=unknown",
+            "seller_impact=unknown",
+            "summary_audit=unknown",
+            "recommendation_audit=unknown",
             "platform=ozon&platform=wildberries",
             "unexpected=yes",
         ):
@@ -144,7 +151,7 @@ class WebTests(unittest.TestCase):
 
     def test_finding_counts_api_uses_findings_authorization_and_filters(self):
         basic = "Basic " + base64.b64encode(b"user:password").decode()
-        path = "/api/findings/counts?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official"
+        path = "/api/findings/counts?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official&seller_impact=negative&summary_audit=ok&recommendation_audit=review"
         expected = {"period": {"all": 1}, "platform": {"all": 1}, "importance": {"all": 1},
                     "topic_status": {"topics": [], "verification": {"all": 1}}, "source_type": {"all": 1}}
         self.assertEqual(self.request("GET", "/api/findings/counts")[0], 401)
@@ -154,9 +161,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(json.loads(body), expected)
         count.assert_called_once_with(self.conn, {
             "period": "week", "platform": "ozon", "importance": 4, "topic": "log",
-            "verification": "needs_check", "trust": "official",
+            "verification": "needs_check", "trust": "official", "seller_impact": "negative",
+            "summary_audit": "ok", "recommendation_audit": "review",
         })
-        for query in ("importance=0", "cursor=old", "unexpected=yes", "period=week&period=today"):
+        for query in (
+            "importance=0", "seller_impact=unknown", "summary_audit=unknown", "recommendation_audit=unknown",
+            "cursor=old", "unexpected=yes", "period=week&period=today",
+        ):
             with self.subTest(query=query):
                 self.assertEqual(self.request("GET", "/api/findings/counts?" + query, basic)[0], 400)
 

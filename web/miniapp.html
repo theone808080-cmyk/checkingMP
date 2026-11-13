@@ -19,7 +19,8 @@
     .finding-level { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; } .importance-square { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border:1px solid #59656b55; border-radius:5px; color:#142027; }
     .seller-impact { display:inline-flex; align-items:center; border-radius:999px; padding:3px 8px; font-size:12px; font-weight:650; background:var(--bg); color:var(--fg); } .seller-impact-positive { color:#13734a; } .seller-impact-negative { color:#b42318; } .seller-impact-mixed { color:#8a5b00; }
     .finding-card { padding:10px 12px; } .finding-card summary { cursor:pointer; } .finding-card summary:focus-visible, .extra-filters summary:focus-visible { outline:3px solid var(--accent); outline-offset:2px; } .finding-card .finding-level { margin-bottom:3px; } .finding-card .importance-square { width:24px; height:24px; } .finding-card h3 { margin:4px 0; font-size:16px; line-height:1.32; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-    .extra-filters { margin:10px 0 6px; } .extra-filters > summary { display:inline-block; cursor:pointer; color:var(--accent); font-weight:700; padding:6px 0; } .finding-filter-groups { margin:8px 0; } .finding-active-filters { display:flex; flex-wrap:wrap; gap:6px; } .active-filter { max-width:100%; overflow-wrap:anywhere; border-radius:999px; padding:3px 8px; background:var(--card); color:var(--muted); border:1px solid var(--line); font-size:12px; }
+    .extra-filters { margin:8px 0 5px; } .extra-filters > summary { display:inline-block; cursor:pointer; color:var(--accent); font-weight:700; padding:5px 0; } .finding-filter-groups { margin:8px 0; } .filters.finding-filter-groups > .filter-group { padding:8px 10px; } .finding-active-filters { display:flex; flex-wrap:wrap; gap:6px; } .active-filter { max-width:100%; overflow-wrap:anywhere; border-radius:999px; padding:3px 8px; background:var(--card); color:var(--muted); border:1px solid var(--line); font-size:12px; }
+    .finding-statuses { display:flex; flex-wrap:wrap; gap:5px; margin:7px 0; } .finding-status { max-width:100%; overflow-wrap:anywhere; border:1px solid var(--line); border-radius:999px; padding:2px 7px; color:var(--fg); background:var(--bg); font-size:11px; line-height:1.45; }
     .importance-1 { background:#b9c1c7; } .importance-2 { background:#79b9e7; } .importance-3 { background:#f4d35e; } .importance-4 { background:#f4a261; } .importance-5 { background:#ef6c68; }
     .finding-sources { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:8px; } .topic-options { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 8px; } .topic-chip { border:1px solid var(--line); border-radius:999px; padding:5px 9px; color:var(--fg); background:var(--card); font-size:13px; cursor:pointer; } .topic-chip[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
     .actions { text-align:center; margin:20px 0; } .more { background:var(--accent); color:var(--button-text); border:0; border-radius:10px; padding:11px 20px; font-weight:700; cursor:pointer; }
@@ -42,14 +43,18 @@
   </section>
   <section id="findings" aria-label="Находки">
     <h2>Находки</h2>
-    <p class="muted">Краткие сводки по изменениям. Неподтверждённые находки требуют проверки.</p>
+    <p class="muted">Сначала конкретные изменения и действия для продавца. Оценки классификатора и проверок показаны отдельно.</p>
     <div class="filters finding-filter-groups">
       <fieldset class="filter-group"><legend>Период</legend><label>Когда опубликовано<select id="finding-period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label></fieldset>
       <fieldset class="filter-group"><legend>Маркетплейс</legend><label>Площадка<select id="finding-platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label></fieldset>
     </div>
     <details class="extra-filters"><summary>Ещё фильтры</summary><div class="filters finding-filter-groups">
       <fieldset class="filter-group"><legend>Важность</legend><label>Уровень<select id="finding-importance"><option value="all">Все уровни</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label></fieldset>
-      <fieldset class="filter-group"><legend>Тема и статус находки</legend><label>Тема<input id="finding-topic" type="search" maxlength="120" placeholder="Найти по теме"></label><div id="finding-topic-options" class="topic-options" role="group" aria-label="Доступные темы"></div><label>Проверка<select id="finding-verification"><option value="all">Любой статус</option><option value="confirmed">Подтверждено</option><option value="needs_check">Нужно проверить</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Тема</legend><label>Найти по теме<input id="finding-topic" type="search" maxlength="120" placeholder="Например, логистика"></label><div id="finding-topic-options" class="topic-options" role="group" aria-label="Доступные темы"></div></fieldset>
+      <fieldset class="filter-group"><legend>Влияние</legend><label>Для продавца<select id="finding-seller-impact"><option value="all">Любое влияние</option><option value="positive">Выгода</option><option value="negative">Риск</option><option value="mixed">Смешанное</option><option value="neutral">Нейтральное</option><option value="unclear">Неясное</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Проверка находки</legend><label>Статус<select id="finding-verification"><option value="all">Любой статус</option><option value="confirmed">Подтверждена</option><option value="needs_check">Нужно проверить</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Аудит сводки</legend><label>Результат<select id="finding-summary-audit"><option value="all">Любой результат</option><option value="ok">Без замечаний</option><option value="review">Требует разбора</option><option value="issue">Есть замечания</option><option value="not_checked">Не проверено</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Аудит рекомендации</legend><label>Результат<select id="finding-recommendation-audit"><option value="all">Любой результат</option><option value="ok">Без замечаний</option><option value="review">Требует разбора</option><option value="issue">Есть замечания</option><option value="not_checked">Не проверено</option></select></label></fieldset>
       <fieldset class="filter-group"><legend>Тип источника</legend><label>Надёжность источника<select id="finding-source-type"><option value="all">Все источники</option><option value="official">Официальный</option><option value="regulator">Регуляторный</option><option value="industry">Отраслевой</option></select></label></fieldset>
     </div></details>
     <div id="finding-active-filters" class="finding-active-filters" aria-live="polite"></div>
@@ -106,9 +111,19 @@
       line.append(square, element('span', '', `Важность ${level}`));
       disclosure.append(line);
     }
-    disclosure.append(element('div', 'meta', `${item.platform || 'Область не указана'} · ${item.topic || 'Без темы'} · ${item.verification === 'confirmed' ? 'Подтверждено' : 'Нужно проверить'}`));
+    disclosure.append(element('div', 'meta', `${item.platform || 'Область не указана'} · ${item.topic || 'Без темы'}`));
     const impactLabels = {positive:'Выгода продавцу', negative:'Риск для продавца', mixed:'Смешанное влияние', neutral:'Нейтральное влияние', unclear:'Влияние неясно'};
     if (impactLabels[item.seller_impact]) disclosure.append(element('span', `seller-impact seller-impact-${item.seller_impact}`, impactLabels[item.seller_impact]));
+    const classificationLabels = {practical_change:'конкретное изменение', seller_action_or_risk:'действие или риск для продавца', industry_context:'отраслевой контекст', irrelevant:'нерелевантно', uncertain:'неоднозначно', not_assessed:'нет оценки'};
+    const relevanceLabels = {relevant:'релевантно продавцу', irrelevant:'не относится к продавцу', uncertain:'неясно', not_assessed:'нет оценки'};
+    const auditLabels = {ok:'без замечаний', review:'требуется разбор', issue:'есть замечания', not_checked:'не проверено'};
+    const statuses = element('div', 'finding-statuses');
+    statuses.append(element('span', 'finding-status', `Классификатор: ${classificationLabels[item.classification] || 'нет оценки'}`));
+    statuses.append(element('span', 'finding-status', `Релевантность: ${relevanceLabels[item.relevance] || 'нет оценки'}`));
+    statuses.append(element('span', 'finding-status', `Проверка находки: ${item.verification === 'confirmed' ? 'подтверждена' : 'нужно проверить'}`));
+    statuses.append(element('span', 'finding-status', `Аудит сводки: ${auditLabels[item.summary_audit] || 'не проверено'}`));
+    statuses.append(element('span', 'finding-status', `Аудит рекомендации: ${auditLabels[item.recommendation_audit] || 'не проверено'}`));
+    disclosure.append(statuses);
     const summary = item.summary || 'Находка без описания';
     const preview = summary.length > 140 ? `${summary.slice(0, 137).trimEnd()}…` : summary;
     disclosure.append(element('h3', '', preview));
@@ -148,7 +163,8 @@
   function updateFindingFilterCounts(counts) {
     const groups = {'finding-period':counts.period, 'finding-platform':counts.platform,
       'finding-importance':counts.importance, 'finding-verification':counts.topic_status && counts.topic_status.verification,
-      'finding-source-type':counts.source_type};
+      'finding-source-type':counts.source_type, 'finding-seller-impact':counts.seller_impact,
+      'finding-summary-audit':counts.summary_audit, 'finding-recommendation-audit':counts.recommendation_audit};
     for (const [id, values] of Object.entries(groups)) {
       const select=byId(id); if (!select || !select.options || !values) continue;
       for (const option of select.options) {
@@ -174,10 +190,12 @@
     host.replaceChildren();
     const selected = [
       ['finding-period','Период'], ['finding-platform','Площадка'], ['finding-importance','Важность'],
-      ['finding-verification','Проверка'], ['finding-source-type','Источник']
+      ['finding-verification','Проверка'], ['finding-source-type','Источник'],
+      ['finding-seller-impact','Влияние'], ['finding-summary-audit','Аудит сводки'],
+      ['finding-recommendation-audit','Аудит рекомендации']
     ];
     for (const [id, label] of selected) {
-      const select=byId(id); if (!select || select.value === 'all') continue;
+      const select=byId(id); if (!select || !select.value || select.value === 'all') continue;
       const option=select.options && select.options[select.selectedIndex];
       host.append(element('span','active-filter',`${label}: ${option ? option.textContent.replace(/\s+\(\d+\)$/,'') : select.value}`));
     }
@@ -189,7 +207,9 @@
     if (findingsState.loading) return;
     const generation = findingsState.generation; findingsState.loading=true; byId('findings-more').hidden=true; byId('findings-status').textContent='Загружаем находки…'; updateActiveFindingFilters();
     const params = new URLSearchParams({period:byId('finding-period').value, platform:byId('finding-platform').value});
-    const optional = {importance:byId('finding-importance').value, topic:byId('finding-topic').value.trim(), verification:byId('finding-verification').value, source_type:byId('finding-source-type').value};
+    const optional = {importance:byId('finding-importance').value, topic:byId('finding-topic').value.trim(), verification:byId('finding-verification').value,
+      source_type:byId('finding-source-type').value, seller_impact:byId('finding-seller-impact').value,
+      summary_audit:byId('finding-summary-audit').value, recommendation_audit:byId('finding-recommendation-audit').value};
     for (const [key, value] of Object.entries(optional)) if (value && value !== 'all') params.set(key, value);
     if (findingsState.cursor) params.set('cursor', findingsState.cursor);
     const countParams = new URLSearchParams(params);
@@ -223,7 +243,7 @@
   }
   byId('nav-feed').addEventListener('click',()=>tab('feed')); byId('nav-findings').addEventListener('click',()=>tab('findings')); byId('nav-about').addEventListener('click',()=>tab('about'));
   byId('period').addEventListener('change',()=>loadFeed(true)); byId('platform').addEventListener('change',()=>loadFeed(true)); byId('more').addEventListener('click',()=>loadFeed(false));
-  for (const id of ['finding-period','finding-platform','finding-importance','finding-source-type']) byId(id).addEventListener('change',()=>loadFindings(true));
+  for (const id of ['finding-period','finding-platform','finding-importance','finding-source-type','finding-seller-impact','finding-summary-audit','finding-recommendation-audit']) byId(id).addEventListener('change',()=>loadFindings(true));
   byId('finding-topic').addEventListener('change',()=>{byId('finding-verification').value='all'; loadFindings(true);});
   byId('finding-verification').addEventListener('change',()=>{byId('finding-topic').value=''; loadFindings(true);});
   byId('findings-more').addEventListener('click',()=>loadFindings(false));
