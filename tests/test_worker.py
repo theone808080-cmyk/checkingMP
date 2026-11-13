@@ -91,7 +91,7 @@ class WorkerTests(unittest.TestCase):
         prompt = json.loads(req.data)["messages"][0]["content"]
         self.assertIn("importance (integer 1-5", prompt)
         self.assertIn("in Russian", prompt)
-        imported_signal = {**signal, "platform": "Межплощадочная: Ozon, Wildberries", "verification": "needs_check"}
+        imported_signal = {**signal, "platform": "Межплощадочная: Ozon, Wildberries", "verification": "needs_check", "seller_impact": "unclear"}
         self.import_mock.assert_called_once_with(self.conn, [imported_signal], [2], translations=TRANSLATIONS, reject_confirmed=True)
         self.assertEqual(self.conn.transactions, 1)
 

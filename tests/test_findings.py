@@ -2,6 +2,7 @@ import os
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import psycopg
 
@@ -151,6 +152,24 @@ class FindingPostgresTests(unittest.TestCase):
         self.assertEqual([item["summary"] for item in result["findings"]], ["wb-high", "ozon-low", "regulator", "industry"])
         self.assertEqual({source["url"] for source in result["findings"][1]["sources"]},
                          {"https://example.org/ozon", "https://example.org/ozon-second"})
+
+    def test_seller_impact_is_returned_without_changing_importance_filter(self):
+        stamp = datetime.now(timezone.utc)
+        material = self.add_material("ozon_telegram", "seller-impact", stamp)
+        finding_id = self.add_finding("seller-impact", "Ozon", 4, stamp, [material])
+        self.conn.execute("UPDATE events SET seller_impact='negative' WHERE id=%s", (finding_id,))
+        legacy_material = self.add_material("ozon_telegram", "seller-impact-legacy", stamp)
+        legacy_id = self.add_finding("seller-impact-legacy", "Ozon", 3, stamp, [legacy_material])
+
+        with patch.dict(os.environ, {"RELEVANCE_FILTER_ENABLED": "0"}):
+            findings = db.feed_findings(self.conn)["findings"]
+            selected = db.feed_findings(self.conn, importance=4)["findings"]
+
+        by_id = {item["id"]: item for item in findings}
+        self.assertEqual(by_id[finding_id]["seller_impact"], "negative")
+        self.assertEqual(by_id[finding_id]["importance"], 4)
+        self.assertEqual(by_id[legacy_id]["seller_impact"], "unclear")
+        self.assertEqual([item["id"] for item in selected], [finding_id])
 
     def test_platform_filter_matches_legacy_display_aliases(self):
         stamp = datetime.now(timezone.utc)
