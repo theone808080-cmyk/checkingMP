@@ -1620,3 +1620,23 @@ def finding_quality_report_rows(conn, run_id: int):
 def finding_quality_run(conn, run_id: int):
     from db.finding_quality import finding_quality_run as fetch_run
     return fetch_run(conn, run_id)
+
+
+def list_finding_impacts(conn, finding_id: int):
+    from db.impacts import list_finding_impacts as fetch
+    return fetch(conn, finding_id)
+
+
+def create_finding_impact(conn, finding_id: int, payload):
+    from db.impacts import create_finding_impact as create
+    return create(conn, finding_id, payload)
+
+
+def update_finding_impact(conn, impact_id: int, payload):
+    from db.impacts import update_finding_impact as update
+    return update(conn, impact_id, payload)
+
+
+def decide_finding_impact(conn, impact_id: int, decision: str, owner_id: str):
+    from db.impacts import decide_finding_impact as decide
+    return decide(conn, impact_id, decision, owner_id)

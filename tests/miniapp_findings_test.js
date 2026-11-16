@@ -19,13 +19,38 @@ function el(id) {
     append(...items) { this.children.push(...items); },
     replaceChildren() { this.children = []; },
     addEventListener(event, cb) { this.handlers[event] = cb; },
+    dispatch(event) { return this.handlers[event] ? this.handlers[event]({target:this}) : undefined; },
     setAttribute(name, value) { this.attributes[name] = value; }
   };
   return elements[id];
 }
 const requests = [];
-async function fetch(url) {
+const requestOptions = [];
+const draftConsequence = 'Changed delivery tariff\nРекомендуемое действие: Review shipments\nСвязь и последствия нужно проверить.';
+async function fetch(url, options) {
   requests.push(url);
+  requestOptions.push({url, options:options || {}});
+  if (url === '/api/findings/7/impacts' && options && options.method === 'POST') {
+    return {ok:true, async json() { return {id:71, platform:'Ozon', object_type:'marketplace', object_name:null,
+      change_type:null, effective_date:null, processes:[], consequence:draftConsequence, source_url:'https://example.org/source',
+      status:'needs_review', decided_by:null, decided_at:null}; }};
+  }
+  if (url === '/api/findings/7/impacts') {
+    return {ok:true, async json() { return {impacts:[]}; }};
+  }
+  if (url === '/api/findings/8/impacts') {
+    return {ok:true, async json() { return {impacts:[{
+      id:72, platform:'Ozon', object_type:'seller_warehouse', object_name:'Склад продавца',
+      change_type:'acceptance', effective_date:'2026-12-01', processes:['acceptance'],
+      consequence:'Сверить график приёмки.', source_url:'https://example.org/impact-source-2',
+      status:'needs_review', decided_by:null, decided_at:null
+    }]}; }};
+  }
+  if (url === '/api/finding-impacts/72/decision') {
+    return {ok:true, async json() { return {id:72, platform:'Ozon', object_type:'seller_warehouse', object_name:'Склад продавца',
+      change_type:'acceptance', effective_date:'2026-12-01', processes:['acceptance'], consequence:'Сверить график приёмки.',
+      source_url:'https://example.org/impact-source-2', status:'confirmed', decided_by:'owner-42', decided_at:'2026-11-16T12:00:00Z', updated_at:'2026-11-16T12:05:00Z'}; }};
+  }
   if (url.startsWith('/api/findings/counts')) {
     return {ok:true, async json() { return {
       period:{all:21,today:21,week:21}, platform:{all:21,ozon:21,wildberries:0,yandex:0,chestny_znak:0,industry:0},
@@ -39,13 +64,13 @@ async function fetch(url) {
   if (url.startsWith('/api/findings')) {
     return {ok:true, async json() { return {
       findings:[{
-        id:7, platform:'Ozon', topic:'logistics', importance:5, seller_impact:'negative', summary:'Changed delivery terms',
+        id:7, platform:'Ozon', topic:'logistics', importance:5, seller_impact:'negative', summary:'Changed delivery tariff',
         recommended_action:'Review shipments', verification:'needs_check', effective_date:null,
         updated_at:'2026-11-09T09:00:00Z', specificity:1, classification:'seller_action_or_risk', relevance:'relevant',
         summary_audit:'ok', recommendation_audit:'review',
         sources:[{name:'Official Ozon',trust:'official',category:'ozon',url:'https://example.org/source',published_at:null,collected_at:'2026-11-09T09:00:00Z'}]
       }, {
-        id:8, platform:'Ozon', topic:'rules', importance:4, seller_impact:'unclear', summary:'No stored assessment',
+        id:8, platform:'Ozon', topic:'rules', importance:4, seller_impact:'unclear', summary:'Changed acceptance schedule',
         recommended_action:'Read the source', verification:'needs_check', effective_date:null,
         updated_at:'2026-11-09T08:00:00Z', specificity:1, classification:'not_assessed', relevance:'not_assessed',
         summary_audit:'not_checked', recommendation_audit:'not_checked', sources:[]
@@ -93,6 +118,46 @@ function collect(node) { return [node, ...(node.children || []).flatMap(collect)
   assert.ok(nodes.some(node => node.className === 'importance-square importance-5'));
   assert.ok(nodes.some(node => node.href === 'https://example.org/source'));
   assert.strictEqual(el('findings').hidden, false);
+  const findingDetails = nodes.filter(node => node.className === 'finding-details');
+  const firstFindingDetails = findingDetails[0];
+  await firstFindingDetails.dispatch('toggle');
+  await tick();
+  const impactText = collect(firstFindingDetails).map(node => node.textContent).join(' ');
+  const saveDraftButton = collect(firstFindingDetails).find(node => node.tagName === 'button' && node.textContent === 'Сохранить карточку');
+  assert.ok(saveDraftButton, 'local draft should let the owner save it without inventing missing details');
+  assert.ok(requests.includes('/api/findings/7/impacts'), 'opening a finding should load its impact cards');
+  assert.ok(impactText.includes('Ozon') && impactText.includes('logistics') && impactText.includes('Changed delivery tariff') && impactText.includes('Review shipments'),
+    'local draft should reuse the already loaded finding fields');
+  assert.ok(impactText.includes('Нужно проверить'), 'a local draft must never appear as confirmed');
+  assert.ok(impactText.includes('Не указано'), 'missing sorting center, process, tariff, and date should remain unspecified');
+  assert.ok(collect(firstFindingDetails).some(node => node.href === 'https://example.org/source'), 'local draft should preserve the loaded finding source link');
+  assert.ok(!requests.some(url => /openrouter|model|infer/i.test(url)), 'local draft should not call a model endpoint');
+  await saveDraftButton.dispatch('click');
+  await tick();
+  const saveRequest = requestOptions.find(request => request.url === '/api/findings/7/impacts' && request.options.method === 'POST');
+  assert.ok(saveRequest, 'saving a local draft should use the finding impact endpoint');
+  assert.deepStrictEqual(JSON.parse(saveRequest.options.body), {
+    platform:'Ozon', object_type:'marketplace', object_name:null, change_type:null, effective_date:null,
+    processes:[], consequence:draftConsequence, source_url:'https://example.org/source'
+  });
+  assert.ok(collect(firstFindingDetails).map(node => node.textContent).join(' ').includes('Нужно проверить'),
+    'saved draft should remain needs_review until the owner makes a separate decision');
+  const secondFindingDetails = findingDetails[1];
+  await secondFindingDetails.dispatch('toggle');
+  await tick();
+  const confirmButton = collect(secondFindingDetails).find(node => node.tagName === 'button' && node.textContent === 'Подтвердить связь');
+  const rejectButton = collect(secondFindingDetails).find(node => node.tagName === 'button' && node.textContent === 'Отклонить');
+  assert.ok(confirmButton && rejectButton, 'saved impact card should offer owner confirmation and rejection');
+  await confirmButton.dispatch('click');
+  await tick();
+  const decisionRequest = requestOptions.find(request => request.url === '/api/finding-impacts/72/decision');
+  assert.strictEqual(decisionRequest.options.method, 'POST');
+  assert.deepStrictEqual(JSON.parse(decisionRequest.options.body), {decision:'confirmed'});
+  assert.ok(collect(secondFindingDetails).map(node => node.textContent).join(' ').includes('Подтверждена'),
+    'owner decision response should replace the visible card status');
+  const decidedText = collect(secondFindingDetails).map(node => node.textContent).join(' ');
+  assert.ok(decidedText.includes('owner-42'), 'saved impact should show which owner account made the decision');
+  assert.ok(decidedText.includes('15:00') && decidedText.includes('15:05'), 'decision and last edit should show Moscow local times');
   await el('findings-more').handlers.click();
   await tick();
   assert.ok(requests.some(url => url.includes('cursor=find-next')));

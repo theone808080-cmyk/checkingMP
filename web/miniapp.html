@@ -24,6 +24,7 @@
     .finding-checks { margin-top:10px; } .finding-checks > summary { cursor:pointer; color:var(--muted); font-size:13px; } .finding-attention { display:inline-block; margin:5px 0; border-radius:6px; padding:3px 7px; color:#7a3500; background:#ffe3bc; font-size:12px; }
     .importance-1 { background:#b9c1c7; } .importance-2 { background:#79b9e7; } .importance-3 { background:#f4d35e; } .importance-4 { background:#f4a261; } .importance-5 { background:#ef6c68; }
     .finding-sources { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:8px; } .topic-options { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 8px; } .topic-chip { border:1px solid var(--line); border-radius:999px; padding:5px 9px; color:var(--fg); background:var(--card); font-size:13px; cursor:pointer; } .topic-chip[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
+    .finding-impacts { margin-top:14px; border-top:1px solid var(--line); padding-top:10px; } .impact-card { border:1px solid var(--line); border-radius:10px; padding:10px; margin:10px 0; } .impact-draft { border-style:dashed; } .impact-editor { display:grid; gap:8px; margin-top:10px; } .impact-field { display:grid; gap:4px; } .impact-processes { display:flex; flex-wrap:wrap; gap:6px 12px; } .impact-processes legend { width:100%; } .impact-process { display:flex; align-items:center; gap:5px; } .impact-card button { margin:8px 8px 0 0; } .impact-card input, .impact-card select, .impact-card textarea { max-width:100%; font:inherit; padding:6px; } .impact-card textarea { min-height:70px; }
     .actions { text-align:center; margin:20px 0; } .more { background:var(--accent); color:var(--button-text); border:0; border-radius:10px; padding:11px 20px; font-weight:700; cursor:pointer; }
     .status { color:var(--muted); min-height:1.5em; } .bottom { position:fixed; bottom:0; left:0; right:0; display:flex; justify-content:center; gap:8px; background:var(--card); border-top:1px solid var(--line); padding:8px 12px calc(8px + env(safe-area-inset-bottom)); }
     .bottom button { flex:1; max-width:220px; padding:10px; border:0; border-radius:9px; color:var(--muted); background:transparent; font-weight:700; cursor:pointer; } .bottom button[aria-selected="true"] { color:var(--accent); background:var(--bg); }
@@ -86,6 +87,7 @@
   if (tg) { tg.ready(); tg.expand(); applyTheme(); tg.onEvent('themeChanged', applyTheme); }
   function element(tag, cls, text) { const node = document.createElement(tag); if (cls) node.className = cls; if (text != null) node.textContent = String(text); return node; }
   function formatDate(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? 'Дата неизвестна' : new Intl.DateTimeFormat('ru-RU', {day:'numeric',month:'short',year:'numeric',timeZone:'Europe/Moscow'}).format(d); }
+  function formatDateTime(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? 'Время неизвестно' : new Intl.DateTimeFormat('ru-RU', {day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'}).format(d); }
   function safeURL(value) { try { const u = new URL(value); return ['http:', 'https:'].includes(u.protocol) ? u.href : null; } catch (_) { return null; } }
   function addCard(item) {
     const card = element('article', 'card');
@@ -141,6 +143,15 @@
     if (item.effective_date) body.append(element('div', 'meta', `Дата вступления в силу: ${formatDate(item.effective_date)}`));
     body.append(element('p', 'meta', `Материалов: ${(item.sources || []).length}`));
     body.append(checks);
+    const impacts = element('section', 'finding-impacts');
+    impacts.setAttribute('aria-label', 'Влияние на склад');
+    body.append(impacts);
+    let impactsLoaded = false;
+    details.addEventListener('toggle', event => {
+      if (event.target.open === false || impactsLoaded) return;
+      impactsLoaded = true;
+      loadFindingImpacts(item, impacts);
+    });
     const links = element('div', 'finding-sources');
     for (const source of item.sources || []) {
       const url = safeURL(source.url);
@@ -155,6 +166,144 @@
     byId('findings-cards').append(card);
   }
   async function request(path, options) { const response = await fetch(path, {cache:'no-store', credentials:'same-origin', ...options}); if (!response.ok) throw new Error(String(response.status)); return response; }
+  const impactProcessNames = {inbound:'Поставка',acceptance:'Приёмка',storage:'Хранение',inventory:'Учёт запасов',shipment:'Отгрузка',delivery:'Доставка',returns:'Возвраты',labeling:'Маркировка',costs:'Затраты',other:'Другое'};
+  const impactChangeNames = {delivery_tariff:'Тариф доставки',commission:'Комиссия',acceptance:'Приёмка',storage:'Хранение',dispatch:'Отгрузка',returns:'Возвраты',logistics_rule:'Правила логистики',other:'Другое'};
+  function warehouseTopic(topic) { return /тариф|логист|склад|достав|поставк|отгруз|при[её]мк|возврат|fulfillment|warehouse|logist|delivery|tariff/i.test(String(topic || '')); }
+  function suggestedChangeType(topic) {
+    const value=String(topic || '');
+    if (/комисс/i.test(value)) return 'commission';
+    if (/тариф|tariff/i.test(value)) return 'delivery_tariff';
+    if (/при[её]мк/i.test(value)) return 'acceptance';
+    if (/хранен/i.test(value)) return 'storage';
+    if (/отгруз/i.test(value)) return 'dispatch';
+    if (/возврат/i.test(value)) return 'returns';
+    return null;
+  }
+  function addImpactFields(container, item, editable) {
+    const processNames = (item.processes || []).map(value => impactProcessNames[value] || 'Не указано');
+    container.append(element('p', 'meta', `Площадка: ${item.platform || 'Не указано'}`));
+    container.append(element('p', 'meta', `Объект: ${item.object_name || 'Не указано'}${item.object_type === 'marketplace' ? ' · площадка' : item.object_type === 'sorting_center' ? ' · СЦ' : item.object_type === 'seller_warehouse' ? ' · склад продавца' : ''}`));
+    container.append(element('p', 'meta', `Изменение: ${impactChangeNames[item.change_type] || 'Не указано'}`));
+    container.append(element('p', 'meta', `Дата вступления в силу: ${item.effective_date ? formatDate(item.effective_date) : 'Не указано'}`));
+    container.append(element('p', 'meta', `Процессы склада: ${processNames.length ? processNames.join(', ') : 'Не указано'}`));
+    container.append(element('p', '', item.consequence || 'Не указано — последствие требует проверки владельцем.'));
+    const url = safeURL(item.source_url);
+    if (url) { const link = element('a', '', 'Первоисточник ↗'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; container.append(link); }
+  }
+  function impactEditor(card, submitLabel, onSubmit) {
+    const form = element('form', 'impact-editor');
+    function formPayload() {
+      const checked = processInputs.filter(input => input.checked).map(input => input.value);
+      return {platform:platform.value, object_type:objectType.value, object_name:objectName.value || null,
+        change_type:changeType.value || null, effective_date:effectiveDate.value || null, processes:checked,
+        consequence:consequence.value, source_url:card.source_url};
+    }
+    async function submit(event) { if (event && event.preventDefault) event.preventDefault(); await onSubmit(formPayload(), button); }
+    form.addEventListener('submit', submit);
+    function field(labelText, control) { const label=element('label','impact-field',labelText); label.append(control); form.append(label); }
+    function select(values, current) { const control=element('select',''); for (const [value,label] of values) { const option=element('option','',label); option.value=value; control.append(option); } control.value=current || values[0][0]; return control; }
+    const platform=select([['Ozon','Ozon'],['Wildberries','Wildberries'],['Яндекс Маркет','Яндекс Маркет'],['Честный знак','Честный знак'],['Межплощадочная','Межплощадочная'],['Отрасль','Отрасль']],card.platform);
+    field('Площадка',platform);
+    const objectType=select([['marketplace','Площадка'],['sorting_center','Сортировочный центр'],['seller_warehouse','Склад продавца'],['other','Другое']],card.object_type);
+    field('Тип объекта',objectType);
+    const objectName=element('input',''); objectName.maxLength=200; objectName.value=card.object_name || ''; field('Объект (если известен)',objectName);
+    const changeType=select([['','Не указано'],...Object.entries(impactChangeNames).map(([value,label])=>[value,label])],card.change_type || ''); field('Вид изменения',changeType);
+    const effectiveDate=element('input',''); effectiveDate.type='date'; effectiveDate.value=card.effective_date || ''; field('Дата вступления в силу (если известна)',effectiveDate);
+    const processNames = Object.entries(impactProcessNames);
+    const processInputs=[];
+    const processGroup=element('fieldset','impact-processes'); processGroup.append(element('legend','','Затронутые процессы'));
+    for (const [value,label] of processNames) { const input=element('input',''); input.type='checkbox'; input.value=value; input.checked=(card.processes || []).includes(value); processInputs.push(input); const option=element('label','impact-process',label); option.append(input); processGroup.append(option); }
+    form.append(processGroup);
+    const consequence=element('textarea',''); consequence.maxLength=2000; consequence.value=card.consequence || ''; field('Возможное последствие / пояснение',consequence);
+    const button=element('button','impact-save',submitLabel); button.type='button'; button.addEventListener('click', submit); form.append(button);
+    return form;
+  }
+  function appendImpactDecisionActions(container, item, redraw) {
+    const status = element('p', 'meta', item.status === 'confirmed' ? 'Подтверждена владельцем' : item.status === 'rejected' ? 'Связь отклонена владельцем' : 'Нужно проверить');
+    container.append(status);
+    if (item.decided_at) container.append(element('p', 'meta', `Решение принял владелец (${item.decided_by || 'учётная запись владельца'}): ${formatDateTime(item.decided_at)}`));
+    if (item.updated_at) container.append(element('p', 'meta', `Последнее изменение карточки: ${formatDateTime(item.updated_at)}`));
+    if (item.status !== 'needs_review') return;
+    for (const [decision, label] of [['confirmed', 'Подтвердить связь'], ['rejected', 'Отклонить']]) {
+      const button = element('button', 'impact-decision', label);
+      button.type = 'button';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          const updated = await (await request(`/api/finding-impacts/${item.id}/decision`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision})})).json();
+          Object.assign(item, updated);
+          redraw();
+        } catch (_) { button.disabled = false; status.textContent = 'Не удалось сохранить решение. Попробуйте ещё раз.'; }
+      });
+      container.append(button);
+    }
+  }
+  function renderSavedImpact(container, card, redraw) {
+    const article = element('article', 'impact-card');
+    article.append(element('h4', '', 'Карточка влияния на склад'));
+    addImpactFields(article, card, false);
+    const edit = element('button', 'impact-edit', 'Исправить карточку'); edit.type='button';
+    edit.addEventListener('click', () => {
+      article.replaceChildren(element('h4', '', 'Исправить карточку влияния'));
+      article.append(impactEditor(card, 'Сохранить изменения', async (payload, button) => {
+        button.disabled=true;
+        try { Object.assign(card, await (await request(`/api/finding-impacts/${card.id}`, {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json()); redraw(); }
+        catch (_) { button.disabled=false; button.textContent='Не удалось сохранить — повторить'; }
+      }));
+    });
+    article.append(edit);
+    appendImpactDecisionActions(article, card, redraw);
+    container.append(article);
+  }
+  function renderLocalDraft(container, finding) {
+    const source = (finding.sources || []).find(value => safeURL(value.url));
+    if (!source || !warehouseTopic(finding.topic)) return false;
+    const card = {
+      platform:finding.platform || 'Отрасль', object_type:'marketplace', object_name:null,
+      change_type:suggestedChangeType(finding.topic), effective_date:finding.effective_date || null, processes:[],
+      consequence:[finding.summary, finding.recommended_action ? `Рекомендуемое действие: ${finding.recommended_action}` : null,
+        'Связь и последствия нужно проверить.'].filter(Boolean).join('\n').slice(0, 2000), source_url:source.url,
+      status:'needs_review', topic:finding.topic
+    };
+    const article = element('article', 'impact-card impact-draft');
+    article.append(element('h4', '', 'Черновик влияния на склад'));
+    article.append(element('p', 'meta', 'Пояснение и рекомендация взяты из находки, проверьте их по источнику.'));
+    article.append(element('p', 'meta', 'Нужно проверить'));
+    addImpactFields(article, card, true);
+    article.append(impactEditor(card, 'Сохранить карточку', async (payload, save) => {
+      save.disabled = true;
+      try {
+        const saved = await (await request(`/api/findings/${finding.id}/impacts`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+        await loadFindingImpacts(finding, container);
+      } catch (_) { save.disabled = false; save.textContent = 'Не удалось сохранить — повторить'; }
+    }));
+    container.append(article);
+    return true;
+  }
+  async function loadFindingImpacts(finding, container) {
+    container.replaceChildren();
+    container.append(element('h3', '', 'Влияние на склад'));
+    container.append(element('p', 'meta', 'Связь с объектом и процессами подтверждает владелец.'));
+    try {
+      const data = await (await request(`/api/findings/${finding.id}/impacts`)).json();
+      if (data.impacts.length) {
+        const redraw = () => {
+          container.replaceChildren(element('h3', '', 'Влияние на склад'));
+          container.append(element('p', 'meta', 'Связь с объектом и процессами подтверждает владелец.'));
+          data.impacts.forEach(card => renderSavedImpact(container, card, redraw));
+          if (warehouseTopic(finding.topic) && (finding.sources || []).some(value => safeURL(value.url))) {
+            const add = element('button', 'impact-add', 'Добавить карточку для другого объекта или процесса'); add.type='button';
+            add.addEventListener('click', () => renderLocalDraft(container, finding)); container.append(add);
+          }
+        };
+        redraw();
+      } else {
+        renderLocalDraft(container, finding);
+        if (!container.children.length || container.children.length < 3) container.append(element('p', 'meta', 'Для этой новости черновик складского влияния не сформирован.'));
+      }
+    } catch (_) { container.append(element('p', 'status', 'Не удалось загрузить карточки влияния.'));
+    }
+  }
   async function loadFeed(reset) {
     if (reset) { state.generation++; state.cursor=null; state.loading=false; byId('cards').replaceChildren(); byId('count').textContent=''; }
     if (state.loading) return;

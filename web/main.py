@@ -203,6 +203,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def same_origin(self):
+        origin = urlparse(self.headers.get("Origin", ""))
+        expected_scheme = self.headers.get("X-Forwarded-Proto", "http").split(",", 1)[0].strip().lower()
+        host = self.headers.get("Host", "")
+        return not (origin.scheme not in ("http", "https") or origin.scheme != expected_scheme
+                    or origin.netloc.casefold() != host.casefold() or origin.path not in ("", "/")
+                    or origin.params or origin.query or origin.fragment or origin.username or origin.password)
+
+    def impact_json_body(self, maximum=8192):
+        lengths = self.headers.get_all("Content-Length", [])
+        if (len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= maximum
+                or self.headers.get("Transfer-Encoding") or self.headers.get_content_type() != "application/json"):
+            raise ValueError("invalid request body")
+        value = json.loads(self.rfile.read(int(lengths[0])).decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("invalid request schema")
+        return value
+
     def do_GET(self):
         if self.path == "/health":
             try:
@@ -297,6 +315,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self.json_response(500, {"error": "service unavailable"})
             return
+        impact_match = re.fullmatch(r"/api/findings/([1-9][0-9]{0,17})/impacts", parsed.path)
+        if impact_match:
+            if parsed.query:
+                self.json_response(400, {"error": "invalid request"})
+                return
+            if not (self.authorized() or self.session_authorized()):
+                self.reject_auth()
+                return
+            try:
+                with db.connect() as conn:
+                    result = db.list_finding_impacts(conn, int(impact_match.group(1)))
+                self.json_response(200, {"impacts": result})
+            except ValueError:
+                self.json_response(404, {"error": "finding not found"})
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
+            return
         if not self.authorized():
             self.reject_auth()
             return
@@ -353,12 +388,39 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeError, TypeError):
                 self.json_response(400, {"error": "invalid request"})
             return
+        parsed = urlparse(self.path)
+        create_match = re.fullmatch(r"/api/findings/([1-9][0-9]{0,17})/impacts", parsed.path)
+        decision_match = re.fullmatch(r"/api/finding-impacts/([1-9][0-9]{0,17})/decision", parsed.path)
+        if create_match or decision_match:
+            if not (self.authorized() or self.session_authorized()):
+                self.reject_auth()
+                return
+            if parsed.query or parsed.fragment or not self.same_origin():
+                self.json_response(403, {"error": "same-origin request required"})
+                return
+            try:
+                payload = self.impact_json_body()
+                with db.connect() as conn:
+                    if create_match:
+                        if set(payload) != {"platform", "object_type", "object_name", "change_type", "effective_date", "processes", "consequence", "source_url"}:
+                            raise ValueError("invalid request schema")
+                        result = db.create_finding_impact(conn, int(create_match.group(1)), payload)
+                        self.json_response(201, result)
+                    else:
+                        if set(payload) != {"decision"} or payload["decision"] not in ("confirmed", "rejected"):
+                            raise ValueError("invalid request schema")
+                        owner = os.environ.get("TELEGRAM_CHAT_ID", "owner") if self.session_authorized() else os.environ.get("WEB_BASIC_USER", "owner")
+                        result = db.decide_finding_impact(conn, int(decision_match.group(1)), payload["decision"], owner)
+                        self.json_response(200, result)
+            except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+                self.json_response(400, {"error": "invalid request"})
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
+            return
         if not self.authorized():
             self.reject_auth()
             return
-        parsed = urlparse(self.path)
         if parsed.path.startswith("/api/source-candidates/"):
-            import re
             match = re.fullmatch(r"/api/source-candidates/([1-9][0-9]{0,17})", parsed.path)
             if not match or parsed.query or parsed.fragment:
                 self.json_response(404, {"error": "not found"})
@@ -416,14 +478,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.json_response(404, {"error": "not found"})
 
+    def do_PATCH(self):
+        parsed = urlparse(self.path)
+        update_match = re.fullmatch(r"/api/finding-impacts/([1-9][0-9]{0,17})", parsed.path)
+        if not update_match:
+            self.method_not_allowed()
+            return
+        if not (self.authorized() or self.session_authorized()):
+            self.reject_auth()
+            return
+        if parsed.query or parsed.fragment or not self.same_origin():
+            self.json_response(403, {"error": "same-origin request required"})
+            return
+        try:
+            payload = self.impact_json_body()
+            with db.connect() as conn:
+                result = db.update_finding_impact(conn, int(update_match.group(1)), payload)
+            self.json_response(200, result)
+        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+            self.json_response(400, {"error": "invalid request"})
+        except Exception:
+            self.json_response(500, {"error": "service unavailable"})
+
     def method_not_allowed(self):
-        if not self.authorized():
+        if not (self.authorized() or self.session_authorized()):
             self.reject_auth()
             return
         self.send_response(405)
         self.end_headers()
 
-    do_HEAD = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = method_not_allowed
+    do_HEAD = do_PUT = do_DELETE = do_OPTIONS = method_not_allowed
 
     def log_message(self, _format, *_args):
         return

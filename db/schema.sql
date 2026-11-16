@@ -312,6 +312,30 @@ CREATE TABLE IF NOT EXISTS event_materials (
     PRIMARY KEY (event_id, material_id)
 );
 
+CREATE TABLE IF NOT EXISTS finding_impacts (
+    id BIGSERIAL PRIMARY KEY,
+    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    material_id INTEGER NOT NULL REFERENCES materials(id),
+    platform TEXT NOT NULL CHECK (platform IN ('Ozon', 'Wildberries', 'Яндекс Маркет', 'Честный знак', 'Межплощадочная', 'Отрасль')),
+    object_type TEXT NOT NULL CHECK (object_type IN ('marketplace', 'sorting_center', 'seller_warehouse', 'other')),
+    object_name TEXT,
+    change_type TEXT CHECK (change_type IS NULL OR change_type IN ('delivery_tariff', 'commission', 'acceptance', 'storage', 'dispatch', 'returns', 'logistics_rule', 'other')),
+    effective_date DATE,
+    processes TEXT[] NOT NULL DEFAULT '{}' CHECK (processes <@ ARRAY['inbound', 'acceptance', 'storage', 'inventory', 'shipment', 'delivery', 'returns', 'labeling', 'costs', 'other']::TEXT[]),
+    consequence TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'needs_review' CHECK (status IN ('needs_review', 'confirmed', 'rejected')),
+    decided_by TEXT,
+    decided_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((status = 'needs_review' AND decided_by IS NULL AND decided_at IS NULL)
+        OR (status IN ('confirmed', 'rejected') AND decided_by IS NOT NULL AND decided_at IS NOT NULL)),
+    CHECK (object_name IS NULL OR length(object_name) <= 200),
+    CHECK (length(consequence) <= 2000),
+    FOREIGN KEY (event_id, material_id) REFERENCES event_materials(event_id, material_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS finding_impacts_event_idx ON finding_impacts(event_id, id);
+
 CREATE TABLE IF NOT EXISTS feed_snapshots (
     id UUID PRIMARY KEY,
     period TEXT NOT NULL,

@@ -149,6 +149,62 @@ class WebTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertEqual(self.request("GET", "/api/findings?" + query, basic)[0], 400)
 
+    def test_finding_impacts_api_accepts_owner_access_and_rejects_foreign_session_cross_origin_or_invalid_payload(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        list_path = "/api/findings/7/impacts"
+        create_path = list_path
+        payload = {
+            "platform": "Ozon", "object_type": "sorting_center", "object_name": "СЦ Казань",
+            "change_type": "delivery_tariff", "effective_date": None, "processes": ["shipment"],
+            "consequence": "Проверить экономику отгрузок.", "source_url": "https://example.test/ozon/news",
+        }
+        self.assertEqual(self.request("GET", list_path)[0], 401)
+        with patch.object(web.db, "list_finding_impacts", return_value=[], create=True):
+            with patch.dict(web.os.environ, {"TELEGRAM_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "42"}):
+                foreign_session = web.telegram_auth.new_session(TOKEN, "43")
+                owner_session = web.telegram_auth.new_session(TOKEN, "42")
+                self.assertEqual(self.request("GET", list_path, headers={"Cookie": f"radar_session={foreign_session}"})[0], 401)
+                self.assertEqual(self.request("GET", list_path, headers={"Cookie": f"radar_session={owner_session}"})[0], 200)
+            self.assertEqual(self.request("GET", list_path, basic)[0], 200)
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        with patch.object(web.db, "create_finding_impact", return_value={"id": 73, **payload, "status": "needs_review"}, create=True) as created:
+            self.assertEqual(self.request("POST", create_path, basic, json.dumps(payload), {**headers, "Origin": "https://attacker.example"})[0], 403)
+            self.assertEqual(self.request("POST", create_path, basic, json.dumps({**payload, "unexpected": True}), headers)[0], 400)
+            status, body = self.request("POST", create_path, basic, json.dumps(payload), headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)["status"], "needs_review")
+        created.assert_called_once_with(self.conn, 7, payload)
+
+    def test_finding_impact_update_requires_same_origin_and_passes_complete_card_to_storage(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        path = "/api/finding-impacts/73"
+        payload = {
+            "platform": "Ozon", "object_type": "seller_warehouse", "object_name": "Склад продавца",
+            "change_type": "acceptance", "effective_date": "2026-12-01", "processes": ["acceptance"],
+            "consequence": "Сверить график приёмки.", "source_url": "https://example.test/ozon/acceptance",
+        }
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        with patch.object(web.db, "update_finding_impact", return_value={"id": 73, **payload, "status": "needs_review"}, create=True) as update:
+            self.assertEqual(self.request("PATCH", path, basic, json.dumps(payload), {**headers, "Origin": "https://attacker.example"})[0], 403)
+            status, body = self.request("PATCH", path, basic, json.dumps(payload), headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["object_name"], "Склад продавца")
+        update.assert_called_once_with(self.conn, 73, payload)
+
+    def test_finding_impact_decision_uses_authorized_owner_and_keeps_error_safe(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        path = "/api/finding-impacts/73/decision"
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        with patch.object(web.db, "decide_finding_impact", return_value={"id": 73, "status": "confirmed", "decided_by": "user"}, create=True) as decide:
+            self.assertEqual(self.request("POST", path, basic, json.dumps({"decision": "unsupported"}), headers)[0], 400)
+            status, body = self.request("POST", path, basic, json.dumps({"decision": "confirmed"}), headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "confirmed")
+        decide.assert_called_once_with(self.conn, 73, "confirmed", "user")
+
     def test_finding_counts_api_uses_findings_authorization_and_filters(self):
         basic = "Basic " + base64.b64encode(b"user:password").decode()
         path = "/api/findings/counts?period=week&platform=ozon&importance=4&topic=log&verification=needs_check&source_type=official&seller_impact=negative&summary_audit=ok&recommendation_audit=review"
