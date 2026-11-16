@@ -440,10 +440,11 @@ def _finding_filter_hash(period: str, platform: str, importance: int | None,
                          topic: str | None, verification: str | None, trust: str | None,
                          seller_impact: str | None = None, summary_audit: str | None = None,
                          recommendation_audit: str | None = None,
-                         relevance_filter: bool = False, relevance_version: str | None = None) -> str:
+                         relevance_filter: bool = False, relevance_version: str | None = None,
+                         read: str = 'all') -> str:
     encoded = json.dumps([period, platform, importance, topic, verification, trust,
                           seller_impact, summary_audit, recommendation_audit,
-                          relevance_filter, relevance_version], ensure_ascii=False, separators=(',', ':')).encode()
+                          relevance_filter, relevance_version, read], ensure_ascii=False, separators=(',', ':')).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
@@ -571,7 +572,8 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
     seller_impact = filters.get('seller_impact')
     summary_audit = filters.get('summary_audit')
     recommendation_audit = filters.get('recommendation_audit')
-    if period not in ('all', 'today', 'week') or platform not in ('all', *_FINDING_PLATFORMS):
+    read = filters.get('read', 'all')
+    if period not in ('all', 'today', 'week', 'fresh') or platform not in ('all', *_FINDING_PLATFORMS) or read not in ('unread', 'read', 'all'):
         raise ValueError('invalid finding filter')
     if importance is not None and (type(importance) is not int or not 1 <= importance <= 5):
         raise ValueError('invalid importance')
@@ -599,14 +601,17 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
             )
             values.append(active_relevance_version())
         if exclude != 'period' and period != 'all':
-            midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
-            start = " - INTERVAL '6 days'" if period == 'week' else ''
-            clauses.append(
-                "EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id = pem.material_id "
-                "WHERE pem.event_id=e.id AND COALESCE(pm.published_at,pm.collected_at) >= (" + midnight + start +
-                ") AT TIME ZONE 'Europe/Moscow' AND COALESCE(pm.published_at,pm.collected_at) < (" + midnight +
-                " + INTERVAL '1 day') AT TIME ZONE 'Europe/Moscow')"
-            )
+            if period == 'fresh':
+                clauses.append("EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id=pem.material_id WHERE pem.event_id=e.id AND COALESCE(pm.published_at,pm.collected_at) >= now()-interval '72 hours')")
+            else:
+                midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
+                start = " - INTERVAL '6 days'" if period == 'week' else ''
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id = pem.material_id "
+                    "WHERE pem.event_id=e.id AND COALESCE(pm.published_at,pm.collected_at) >= (" + midnight + start +
+                    ") AT TIME ZONE 'Europe/Moscow' AND COALESCE(pm.published_at,pm.collected_at) < (" + midnight +
+                    " + INTERVAL '1 day') AT TIME ZONE 'Europe/Moscow')"
+                )
         if exclude != 'platform' and platform != 'all':
             clauses.append('(lower(e.platform)=ANY(%s) OR lower(e.platform) ~ %s)')
             values.extend((list(_FINDING_PLATFORMS[platform]), _FINDING_PLATFORM_PATTERNS[platform]))
@@ -625,6 +630,10 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
             clauses.append("COALESCE(qa.summary_audit, 'not_checked')=%s"); values.append(summary_audit)
         if exclude != 'recommendation_audit' and recommendation_audit is not None:
             clauses.append("COALESCE(qa.recommendation_audit, 'not_checked')=%s"); values.append(recommendation_audit)
+        if read == 'unread':
+            clauses.append('NOT EXISTS (SELECT 1 FROM finding_read_state fr WHERE fr.event_id=e.id)')
+        elif read == 'read':
+            clauses.append('EXISTS (SELECT 1 FROM finding_read_state fr WHERE fr.event_id=e.id)')
         if extra:
             clauses.append(extra); values.extend(extra_params)
         return (' AND '.join(clauses) if clauses else 'true'), tuple(values)
@@ -642,7 +651,10 @@ def finding_filter_counts(conn, filters: dict[str, Any] | None = None) -> dict[s
 
     result: dict[str, Any] = {}
     result['period'] = {'all': count('period')}
-    for value in ('today', 'week'):
+    for value in ('today', 'week', 'fresh'):
+        if value == 'fresh':
+            result['period'][value] = count('period', "EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id=pem.material_id WHERE pem.event_id=e.id AND COALESCE(pm.published_at,pm.collected_at) >= now()-interval '72 hours')")
+            continue
         midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
         start = " - INTERVAL '6 days'" if value == 'week' else ''
         clause = (
@@ -720,8 +732,9 @@ def relevance_filter_active(conn) -> bool:
 def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: int | None = None,
                   topic: str | None = None, verification: str | None = None, trust: str | None = None,
                   cursor: str | None = None, limit: int = 20, *, seller_impact: str | None = None,
-                  summary_audit: str | None = None, recommendation_audit: str | None = None) -> dict[str, Any]:
-    if period not in ('all', 'today', 'week') or platform not in ('all', *_FINDING_PLATFORMS):
+                  summary_audit: str | None = None, recommendation_audit: str | None = None,
+                  read: str = 'all') -> dict[str, Any]:
+    if period not in ('all', 'today', 'week', 'fresh') or platform not in ('all', *_FINDING_PLATFORMS) or read not in ('unread', 'read', 'all'):
         raise ValueError('invalid finding filter')
     if importance is not None and (type(importance) is not int or not 1 <= importance <= 5):
         raise ValueError('invalid importance')
@@ -744,7 +757,7 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
     relevance_version = active_relevance_version() if filter_enabled else None
     filter_hash = _finding_filter_hash(period, platform, importance, topic, verification, trust,
                                        seller_impact, summary_audit, recommendation_audit,
-                                       filter_enabled, relevance_version)
+                                       filter_enabled, relevance_version, read)
     position = _decode_findings_cursor(cursor, filter_hash) if cursor is not None else None
 
     conditions: list[str] = []
@@ -756,7 +769,12 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
             "AND ra.rules_version=%s AND ra.relevance='relevant')"
         )
         params.append(relevance_version)
-    if period != 'all':
+    if period == 'fresh':
+        conditions.append(
+            "EXISTS (SELECT 1 FROM event_materials pem JOIN materials pm ON pm.id=pem.material_id "
+            "WHERE pem.event_id=e.id AND COALESCE(pm.published_at,pm.collected_at) >= now()-interval '72 hours')"
+        )
+    elif period != 'all':
         start_offset = " - INTERVAL '6 days'" if period == 'week' else ''
         moscow_midnight = "date_trunc('day', now() AT TIME ZONE 'Europe/Moscow')"
         conditions.append(
@@ -785,6 +803,10 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
             'JOIN sources ts ON ts.id = tm.source_id WHERE tem.event_id = e.id AND ts.trust = %s)'
         )
         params.append(trust)
+    if read == 'unread':
+        conditions.append('NOT EXISTS (SELECT 1 FROM finding_read_state fr WHERE fr.event_id=e.id)')
+    elif read == 'read':
+        conditions.append('EXISTS (SELECT 1 FROM finding_read_state fr WHERE fr.event_id=e.id)')
     if seller_impact is not None:
         conditions.append('COALESCE(ev.seller_impact,e.seller_impact) = %s')
         params.append(seller_impact)
@@ -805,6 +827,7 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
         "COALESCE(ev.relevance, 'not_assessed') AS relevance, "
         "COALESCE(qa.summary_audit, 'not_checked') AS summary_audit, "
         "COALESCE(qa.recommendation_audit, 'not_checked') AS recommendation_audit, "
+        "(frs.event_id IS NOT NULL) AS read, "
         "CASE COALESCE(ev.classification, 'not_assessed') "
         "WHEN 'practical_change' THEN 1 WHEN 'seller_action_or_risk' THEN 2 "
         "WHEN 'industry_context' THEN 3 WHEN 'uncertain' THEN 4 ELSE 5 END AS usefulness_rank, "
@@ -815,7 +838,8 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
         "JOIN materials m ON m.id = em.material_id JOIN sources s ON s.id = m.source_id "
         "LEFT JOIN relevance_by_event ev ON ev.event_id=e.id "
         "LEFT JOIN quality_by_finding qa ON qa.finding_id=e.id "
-        "WHERE " + where + " GROUP BY e.id, ev.classification, ev.relevance, ev.seller_impact, qa.summary_audit, qa.recommendation_audit) "
+        "LEFT JOIN finding_read_state frs ON frs.event_id=e.id "
+        "WHERE " + where + " GROUP BY e.id, ev.classification, ev.relevance, ev.seller_impact, qa.summary_audit, qa.recommendation_audit, frs.event_id) "
     )
     general_platforms = ['all', 'cross_platform', 'межплощадочная', 'все маркетплейсы']
     base_params = [active_relevance_version(), _PLATFORM_SPECIFIC_PATTERN, general_platforms,
@@ -847,6 +871,8 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
     page_ids = event_ids[offset:offset + limit + 1]
     has_more = len(page_ids) > limit
     page_ids = page_ids[:limit]
+    page_read_filter = ('WHERE frs.event_id IS NULL' if read == 'unread'
+                        else 'WHERE frs.event_id IS NOT NULL' if read == 'read' else '')
     rows = conn.execute(
         "WITH " + _finding_evaluation_ctes() + " "
         """SELECT e.id, e.platform, e.topic, e.importance, COALESCE(ev.seller_impact,e.seller_impact) AS seller_impact,
@@ -858,6 +884,7 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
                   COALESCE(ev.relevance, 'not_assessed') AS relevance,
                   COALESCE(qa.summary_audit, 'not_checked') AS summary_audit,
                   COALESCE(qa.recommendation_audit, 'not_checked') AS recommendation_audit,
+                  (frs.event_id IS NOT NULL) AS read,
                   json_agg(json_build_object('name', s.name, 'trust', s.trust, 'category', s.category, 'url', m.url,
                     'published_at', m.published_at, 'collected_at', m.collected_at)
                     ORDER BY COALESCE(m.published_at, m.collected_at) DESC, m.id DESC) AS sources
@@ -868,17 +895,36 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
            JOIN sources s ON s.id = m.source_id
             LEFT JOIN relevance_by_event ev ON ev.event_id=e.id
             LEFT JOIN quality_by_finding qa ON qa.finding_id=e.id
+            LEFT JOIN finding_read_state frs ON frs.event_id=e.id
+            """ + page_read_filter + """
             GROUP BY e.id, page.ordinal, ev.classification, ev.relevance, ev.seller_impact,
-                     qa.summary_audit, qa.recommendation_audit
+                     qa.summary_audit, qa.recommendation_audit, frs.event_id
             ORDER BY page.ordinal""",
          (active_relevance_version(), _PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN, page_ids),
     ).fetchall()
     names = ('id', 'platform', 'topic', 'importance', 'seller_impact', 'summary', 'recommended_action',
              'verification', 'effective_date', 'updated_at', 'specificity', 'classification', 'relevance',
-             'summary_audit', 'recommendation_audit', 'sources')
+            'summary_audit', 'recommendation_audit', 'read', 'sources')
     findings = [dict(zip(names, row)) for row in rows]
     next_cursor = _encode_findings_cursor(snapshot_id, offset + limit, filter_hash) if has_more else None
     return {'findings': findings, 'total': total, 'next_cursor': next_cursor}
+
+
+def set_finding_read(conn, finding_id: int, read: bool) -> dict[str, Any]:
+    if type(finding_id) is not int or finding_id < 1 or type(read) is not bool:
+        raise ValueError('invalid finding read state')
+    exists = conn.execute('SELECT 1 FROM events WHERE id=%s', (finding_id,)).fetchone()
+    if exists is None:
+        raise ValueError('finding not found')
+    if read:
+        conn.execute(
+            """INSERT INTO finding_read_state(event_id) VALUES (%s)
+               ON CONFLICT(event_id) DO UPDATE SET read_at=now()""",
+            (finding_id,),
+        )
+    else:
+        conn.execute('DELETE FROM finding_read_state WHERE event_id=%s', (finding_id,))
+    return {'id': finding_id, 'read': read}
 
 
 def feed_sources(conn) -> list[dict[str, Any]]:

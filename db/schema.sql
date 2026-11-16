@@ -274,6 +274,11 @@ CREATE TABLE IF NOT EXISTS events (
 );
 ALTER TABLE events ADD COLUMN IF NOT EXISTS seller_impact TEXT NOT NULL DEFAULT 'unclear';
 
+CREATE TABLE IF NOT EXISTS finding_read_state (
+    event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    read_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'events'::regclass AND conname = 'events_seller_impact_allowed_check') THEN

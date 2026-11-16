@@ -149,6 +149,24 @@ class WebTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertEqual(self.request("GET", "/api/findings?" + query, basic)[0], 400)
 
+    def test_findings_read_filter_and_read_mutation_are_owner_only_and_same_origin(self):
+        basic = "Basic " + base64.b64encode(b"user:password").decode()
+        finding = {"id": 7, "platform": "Ozon", "read": False}
+        with patch.object(web.db, "feed_findings", return_value={"findings": [finding], "total": 1, "next_cursor": None}) as feed:
+            status, body = self.request("GET", "/api/findings?read=unread&period=fresh", basic)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["findings"], [finding])
+        self.assertEqual(feed.call_args.kwargs["read"], "unread")
+        self.assertEqual(feed.call_args.kwargs["period"], "fresh")
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        with patch.object(web.db, "set_finding_read", return_value={"id": 7, "read": True}, create=True) as set_read:
+            self.assertEqual(self.request("POST", "/api/findings/7/read", basic, '{"read":true}', {**headers, "Origin": "https://attacker.example"})[0], 403)
+            status, body = self.request("POST", "/api/findings/7/read", basic, '{"read":true}', headers)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["read"])
+        set_read.assert_called_once_with(self.conn, 7, True)
+
     def test_finding_impacts_api_accepts_owner_access_and_rejects_foreign_session_cross_origin_or_invalid_payload(self):
         basic = "Basic " + base64.b64encode(b"user:password").decode()
         list_path = "/api/findings/7/impacts"

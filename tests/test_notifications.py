@@ -91,7 +91,7 @@ class NotificationPostgresTests(unittest.TestCase):
     def setUp(self):
         self.conn = psycopg.connect(os.environ['TEST_DATABASE_URL'], autocommit=True)
         self.addCleanup(self.conn.close)
-        self.conn.execute('CREATE TEMP TABLE materials (id SERIAL PRIMARY KEY)')
+        self.conn.execute('CREATE TEMP TABLE materials (id SERIAL PRIMARY KEY, published_at TIMESTAMPTZ, collected_at TIMESTAMPTZ NOT NULL DEFAULT now())')
         self.conn.execute('CREATE TEMP TABLE notification_state (id INT PRIMARY KEY, initialized BOOLEAN NOT NULL)')
         self.conn.execute('CREATE TEMP TABLE notification_batches (id BIGSERIAL PRIMARY KEY, count INT NOT NULL, sent_at TIMESTAMPTZ, telegram_message_id BIGINT)')
         self.conn.execute('CREATE TEMP TABLE notification_materials (material_id INT PRIMARY KEY, batch_id BIGINT)')
@@ -110,6 +110,29 @@ class NotificationPostgresTests(unittest.TestCase):
         self.assertEqual(second[1], 1)
         telegram.mark_sent(self.conn, second[0], 43)
         self.assertIsNone(telegram.claim_batch(self.conn))
+
+    def test_stale_material_is_recorded_without_a_notification_and_fresh_material_is_delivered(self):
+        telegram.initialize(self.conn)
+        stale_id = self.conn.execute("""INSERT INTO materials(published_at, collected_at)
+                                        VALUES (now() - interval '72 hours 1 second', now()) RETURNING id""").fetchone()[0]
+        fresh_id = self.conn.execute("INSERT INTO materials(published_at, collected_at) VALUES (NULL, now()) RETURNING id").fetchone()[0]
+        batch = telegram.claim_batch(self.conn)
+        self.assertEqual(batch[1], 1)
+        tracked = self.conn.execute("SELECT material_id, batch_id FROM notification_materials ORDER BY material_id").fetchall()
+        self.assertEqual(tracked, [(stale_id, None), (fresh_id, batch[0])])
+        telegram.mark_sent(self.conn, batch[0], 42)
+
+    def test_pending_batch_ages_out_before_retry_and_only_fresh_material_is_claimed(self):
+        telegram.initialize(self.conn)
+        stale_id = self.conn.execute("INSERT INTO materials DEFAULT VALUES RETURNING id").fetchone()[0]
+        pending = telegram.claim_batch(self.conn)
+        self.assertEqual(self.conn.execute("SELECT batch_id FROM notification_materials WHERE material_id=%s", (stale_id,)).fetchone()[0], pending[0])
+        self.conn.execute("UPDATE materials SET collected_at=now() - interval '72 hours 1 second' WHERE id=%s", (stale_id,))
+        fresh_id = self.conn.execute("INSERT INTO materials DEFAULT VALUES RETURNING id").fetchone()[0]
+        retry = telegram.claim_batch(self.conn)
+        self.assertEqual(retry[1], 1)
+        tracked = self.conn.execute("SELECT material_id, batch_id FROM notification_materials ORDER BY material_id").fetchall()
+        self.assertEqual(tracked, [(stale_id, None), (fresh_id, retry[0])])
 
     def test_failed_send_is_retried_and_confirmed_send_is_not_repeated(self):
         telegram.initialize(self.conn)

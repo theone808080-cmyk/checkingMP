@@ -30,6 +30,9 @@ const draftConsequence = 'Changed delivery tariff\nРекомендуемое д
 async function fetch(url, options) {
   requests.push(url);
   requestOptions.push({url, options:options || {}});
+  if (url === '/api/findings/7/read') {
+    return {ok:true, async json() { return {id:7, read:true}; }};
+  }
   if (url === '/api/findings/7/impacts' && options && options.method === 'POST') {
     return {ok:true, async json() { return {id:71, platform:'Ozon', object_type:'marketplace', object_name:null,
       change_type:null, effective_date:null, processes:[], consequence:draftConsequence, source_url:'https://example.org/source',
@@ -88,9 +91,12 @@ function collect(node) { return [node, ...(node.children || []).flatMap(collect)
   await tick();
   await tick();
   assert.ok(requests.some(url => url.startsWith('/api/findings?')));
+  const findingsRequest = requests.find(url => url.startsWith('/api/findings?'));
+  assert.ok(findingsRequest.includes('period=fresh') && findingsRequest.includes('read=unread') && findingsRequest.includes('platform=all'),
+    'default finding request should explicitly select fresh unread findings');
   const countsRequest = requests.find(url => url.startsWith('/api/findings/counts?'));
   assert.ok(countsRequest, 'finding filters should request full-result counts');
-  assert.ok(countsRequest.includes('period=all') && countsRequest.includes('platform=all'));
+  assert.ok(countsRequest.includes('period=fresh') && countsRequest.includes('read=unread') && countsRequest.includes('platform=all'));
   const visible = collect(el('findings-cards')).map(node => node.textContent).join(' ');
   assert.ok(visible.includes('Важность 5'), 'finding should show a numbered importance label');
   assert.ok(/риск|отрицател|негатив|ухудшен/i.test(visible), 'finding should show negative seller impact in Russian');
@@ -161,6 +167,14 @@ function collect(node) { return [node, ...(node.children || []).flatMap(collect)
   await el('findings-more').handlers.click();
   await tick();
   assert.ok(requests.some(url => url.includes('cursor=find-next')));
+  const archiveButton = collect(firstFindingDetails).find(node => node.tagName === 'button' && node.textContent === 'В архив');
+  assert.ok(archiveButton, 'unread finding should offer an archive action that marks it as read');
+  await archiveButton.dispatch('click');
+  await tick();
+  const archiveRequest = requestOptions.find(request => request.url === '/api/findings/7/read');
+  assert.ok(archiveRequest, 'archive action should persist read state');
+  assert.strictEqual(archiveRequest.options.method, 'POST');
+  assert.deepStrictEqual(JSON.parse(archiveRequest.options.body), {read:true});
   const topicButtons = collect(el('finding-topic-options')).filter(node => String(node.tagName).toLowerCase() === 'button');
   assert.strictEqual(topicButtons.length, 1, 'available topics should be rendered as one button per topic');
   const topicButton = topicButtons[0];

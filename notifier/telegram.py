@@ -84,8 +84,34 @@ def claim_batch(conn):
     with conn.transaction():
         row = conn.execute('SELECT id, count FROM notification_batches WHERE sent_at IS NULL ORDER BY id LIMIT 1').fetchone()
         if row:
-            return row
-        ids = [r[0] for r in conn.execute('SELECT id FROM materials WHERE NOT EXISTS (SELECT 1 FROM notification_materials n WHERE n.material_id = materials.id) ORDER BY id').fetchall()]
+            stale_ids = [r[0] for r in conn.execute(
+                """SELECT nm.material_id FROM notification_materials nm JOIN materials m ON m.id=nm.material_id
+                   WHERE nm.batch_id=%s AND COALESCE(m.published_at,m.collected_at) < now()-interval '72 hours'""",
+                (row[0],),
+            ).fetchall()]
+            if not stale_ids:
+                return row
+            conn.execute("UPDATE notification_materials SET batch_id=NULL WHERE material_id=ANY(%s)", (stale_ids,))
+            remaining = conn.execute(
+                "SELECT count(*) FROM notification_materials WHERE batch_id=%s", (row[0],)
+            ).fetchone()[0]
+            if remaining:
+                conn.execute("UPDATE notification_batches SET count=%s WHERE id=%s", (remaining, row[0]))
+                return row[0], remaining
+            conn.execute("DELETE FROM notification_batches WHERE id=%s AND sent_at IS NULL", (row[0],))
+        conn.execute(
+            """INSERT INTO notification_materials (material_id, batch_id)
+               SELECT m.id, NULL FROM materials m
+               WHERE COALESCE(m.published_at,m.collected_at) < now()-interval '72 hours'
+                 AND NOT EXISTS (SELECT 1 FROM notification_materials n WHERE n.material_id=m.id)
+               ON CONFLICT (material_id) DO NOTHING"""
+        )
+        ids = [r[0] for r in conn.execute(
+            """SELECT id FROM materials
+               WHERE COALESCE(published_at,collected_at) >= now()-interval '72 hours'
+                 AND NOT EXISTS (SELECT 1 FROM notification_materials n WHERE n.material_id=materials.id)
+               ORDER BY id"""
+        ).fetchall()]
         if not ids:
             return None
         batch = conn.execute('INSERT INTO notification_batches (count) VALUES (%s) RETURNING id, count', (len(ids),)).fetchone()

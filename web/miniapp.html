@@ -47,7 +47,8 @@
     <h2>Находки</h2>
     <p class="muted">Сначала конкретные изменения и действия для продавца. Оценки классификатора и проверок показаны отдельно.</p>
     <div class="filters finding-filter-groups">
-      <fieldset class="filter-group"><legend>Период</legend><label>Когда опубликовано<select id="finding-period"><option value="all">Все</option><option value="today">Сегодня</option><option value="week">Неделя</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Период</legend><label>Когда опубликовано<select id="finding-period"><option value="fresh" selected>За 3 дня</option><option value="today">Сегодня</option><option value="week">Неделя</option><option value="all">Все даты</option></select></label></fieldset>
+      <fieldset class="filter-group"><legend>Прочтение</legend><label>Показать<select id="finding-read"><option value="unread" selected>Новые</option><option value="read">Архив прочитанных</option><option value="all">Все</option></select></label></fieldset>
       <fieldset class="filter-group"><legend>Маркетплейс</legend><label>Площадка<select id="finding-platform"><option value="all">Все</option><option value="ozon">Ozon</option><option value="wildberries">Wildberries</option><option value="yandex">Яндекс Маркет</option><option value="chestny_znak">Честный знак</option><option value="industry">Отраслевые</option></select></label></fieldset>
     </div>
     <details class="extra-filters"><summary>Ещё фильтры</summary><div class="filters finding-filter-groups">
@@ -74,6 +75,8 @@
   'use strict';
   const tg = window.Telegram && window.Telegram.WebApp;
   const byId = id => document.getElementById(id);
+  byId('finding-period').value = 'fresh';
+  byId('finding-read').value = 'unread';
   const state = { cursor:null, generation:0, loading:false };
   const findingsState = { cursor:null, generation:0, loading:false };
   function applyTheme() {
@@ -161,6 +164,16 @@
       links.append(link);
     }
     if (links.children.length) body.append(links);
+    const readButton = element('button', 'finding-read-action', item.read ? 'Вернуть в новые' : 'В архив');
+    readButton.type = 'button';
+    readButton.addEventListener('click', async () => {
+      readButton.disabled = true;
+      try {
+        await request(`/api/findings/${item.id}/read`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({read:!item.read})});
+        await loadFindings(true);
+      } catch (_) { readButton.disabled = false; byId('findings-status').textContent='Не удалось изменить статус прочтения. Попробуйте ещё раз.'; }
+    });
+    body.append(readButton);
     details.append(body);
     card.append(details);
     byId('findings-cards').append(card);
@@ -348,7 +361,7 @@
     host.replaceChildren();
     const selected = [
       ['finding-period','Период'], ['finding-platform','Площадка'], ['finding-importance','Важность'],
-      ['finding-verification','Проверка'], ['finding-source-type','Источник'],
+      ['finding-read','Прочтение'], ['finding-verification','Проверка'], ['finding-source-type','Источник'],
       ['finding-seller-impact','Влияние'], ['finding-summary-audit','Аудит сводки'],
       ['finding-recommendation-audit','Аудит рекомендации']
     ];
@@ -364,7 +377,7 @@
     if (reset) { findingsState.generation++; findingsState.cursor=null; findingsState.loading=false; byId('findings-cards').replaceChildren(); byId('findings-count').textContent=''; }
     if (findingsState.loading) return;
     const generation = findingsState.generation; findingsState.loading=true; byId('findings-more').hidden=true; byId('findings-status').textContent='Загружаем находки…'; updateActiveFindingFilters();
-    const params = new URLSearchParams({period:byId('finding-period').value, platform:byId('finding-platform').value});
+    const params = new URLSearchParams({period:byId('finding-period').value, platform:byId('finding-platform').value, read:byId('finding-read').value});
     const optional = {importance:byId('finding-importance').value, topic:byId('finding-topic').value.trim(), verification:byId('finding-verification').value,
       source_type:byId('finding-source-type').value, seller_impact:byId('finding-seller-impact').value,
       summary_audit:byId('finding-summary-audit').value, recommendation_audit:byId('finding-recommendation-audit').value};
@@ -401,7 +414,13 @@
   }
   byId('nav-feed').addEventListener('click',()=>tab('feed')); byId('nav-findings').addEventListener('click',()=>tab('findings')); byId('nav-about').addEventListener('click',()=>tab('about'));
   byId('period').addEventListener('change',()=>loadFeed(true)); byId('platform').addEventListener('change',()=>loadFeed(true)); byId('more').addEventListener('click',()=>loadFeed(false));
-  for (const id of ['finding-period','finding-platform','finding-importance','finding-source-type','finding-seller-impact','finding-summary-audit','finding-recommendation-audit']) byId(id).addEventListener('change',()=>loadFindings(true));
+  byId('finding-period').addEventListener('change',()=>loadFindings(true));
+  byId('finding-read').addEventListener('change',()=>{
+    if (byId('finding-read').value === 'read' && byId('finding-period').value === 'fresh') byId('finding-period').value = 'all';
+    else if (byId('finding-read').value === 'unread' && byId('finding-period').value === 'all') byId('finding-period').value = 'fresh';
+    loadFindings(true);
+  });
+  for (const id of ['finding-platform','finding-importance','finding-source-type','finding-seller-impact','finding-summary-audit','finding-recommendation-audit']) byId(id).addEventListener('change',()=>loadFindings(true));
   byId('finding-topic').addEventListener('change',()=>{byId('finding-verification').value='all'; loadFindings(true);});
   byId('finding-verification').addEventListener('change',()=>{byId('finding-topic').value=''; loadFindings(true);});
   byId('findings-more').addEventListener('click',()=>loadFindings(false));

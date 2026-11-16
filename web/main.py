@@ -271,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
                     allowed = {"period", "platform", "cursor", "limit"}
                 elif parsed.path in ("/api/findings", "/api/findings/counts"):
                     allowed = {"period", "platform", "importance", "topic", "verification", "source_type",
-                               "seller_impact", "summary_audit", "recommendation_audit", "cursor", "limit"}
+                               "seller_impact", "summary_audit", "recommendation_audit", "cursor", "limit", "read"}
                 else:
                     allowed = set()
                 if any(key not in allowed or len(values) != 1 for key, values in params.items()):
@@ -294,18 +294,21 @@ class Handler(BaseHTTPRequestHandler):
                             "summary_audit": params.get("summary_audit", [None])[0],
                             "recommendation_audit": params.get("recommendation_audit", [None])[0],
                         }
+                        if "read" in params:
+                            filters["read"] = params["read"][0]
                         if parsed.path == "/api/findings/counts":
                             if "cursor" in params or "limit" in params:
                                 raise ValueError("pagination is not supported for counts")
                             result = db.finding_filter_counts(conn, filters)
                         else:
+                            read_filter = {"read": filters["read"]} if "read" in filters else {}
                             result = db.feed_findings(
                                 conn, period=filters["period"], platform=filters["platform"],
                                 importance=filters["importance"], topic=filters["topic"],
                                 verification=filters["verification"], trust=filters["trust"],
                                 cursor=params.get("cursor", [None])[0], limit=limit,
                                 seller_impact=filters["seller_impact"], summary_audit=filters["summary_audit"],
-                                recommendation_audit=filters["recommendation_audit"],
+                                recommendation_audit=filters["recommendation_audit"], **read_filter,
                             )
                     else:
                         result = db.feed_sources(conn)
@@ -389,6 +392,31 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(400, {"error": "invalid request"})
             return
         parsed = urlparse(self.path)
+        read_match = re.fullmatch(r"/api/findings/([1-9][0-9]{0,17})/read", parsed.path)
+        if read_match:
+            if not (self.authorized() or self.session_authorized()):
+                self.reject_auth()
+                return
+            if parsed.query or parsed.fragment or not self.same_origin():
+                self.json_response(403, {"error": "same-origin request required"})
+                return
+            try:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 1024
+                        or self.headers.get("Transfer-Encoding")
+                        or self.headers.get_content_type() != "application/json"):
+                    raise ValueError("invalid request body")
+                payload = json.loads(self.rfile.read(int(lengths[0])).decode("utf-8"))
+                if not isinstance(payload, dict) or set(payload) != {"read"} or type(payload["read"]) is not bool:
+                    raise ValueError("invalid request schema")
+                with db.connect() as conn:
+                    result = db.set_finding_read(conn, int(read_match.group(1)), payload["read"])
+                self.json_response(200, result)
+            except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+                self.json_response(400, {"error": "invalid request"})
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
+            return
         create_match = re.fullmatch(r"/api/findings/([1-9][0-9]{0,17})/impacts", parsed.path)
         decision_match = re.fullmatch(r"/api/finding-impacts/([1-9][0-9]{0,17})/decision", parsed.path)
         if create_match or decision_match:
