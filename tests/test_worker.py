@@ -218,7 +218,7 @@ class WorkerTests(unittest.TestCase):
     def test_infer_schema_failure_logs_allowlisted_reason(self):
         cases = (
             ({"signals": [], "skipped_material_ids": []}, "schema_required_fields"),
-            ({"signals": [{**SIGNAL, "summary": ""}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_signal_fields"),
+            ({"signals": [{**SIGNAL, "summary": ""}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "signal_summary_empty"),
             ({"signals": [{**SIGNAL, "importance": 6}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_importance"),
             ({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_material_ids"),
             ({"signals": [SIGNAL], "skipped_material_ids": [1], "translations": TRANSLATIONS}, "schema_material_ids"),
@@ -230,9 +230,86 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(diagnostic["stage"], "schema")
                 self.assertEqual(diagnostic["reason"], expected_reason)
                 self.assertIn(diagnostic["reason"], {
-                    "schema_required_fields", "schema_signal_fields", "schema_importance",
+                    "schema_required_fields", "signal_not_object", "signal_platform_type",
+                    "signal_platform_empty", "signal_platform_unsupported", "signal_topic_type",
+                    "signal_topic_empty", "signal_summary_type", "signal_summary_empty",
+                    "signal_recommended_action_type", "signal_recommended_action_empty",
+                    "signal_event_key_type", "signal_event_key_empty", "signal_effective_date_type",
+                    "signal_effective_date_format", "signal_validation_unexpected", "schema_importance",
                     "schema_material_ids", "schema_translation",
                 })
+
+    def test_validate_signal_required_fields_have_specific_reason_codes(self):
+        cases = [(None, "signal_not_object")]
+        field_codes = {
+            "platform": ("signal_platform_type", "signal_platform_empty"),
+            "topic": ("signal_topic_type", "signal_topic_empty"),
+            "summary": ("signal_summary_type", "signal_summary_empty"),
+            "recommended_action": ("signal_recommended_action_type", "signal_recommended_action_empty"),
+        }
+        for field, (type_code, empty_code) in field_codes.items():
+            missing = {key: value for key, value in SIGNAL.items() if key != field}
+            wrong_type = {**SIGNAL, field: 42}
+            empty = {**SIGNAL, field: " "}
+            cases.extend(((missing, type_code), (wrong_type, type_code), (empty, empty_code)))
+        cases.append(({**SIGNAL, "platform": "Unknown marketplace"}, "signal_platform_unsupported"))
+
+        for signal, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason, signal=signal):
+                payload = {"signals": [signal], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+                with self.assertRaises(worker.ResponseValidationError) as caught:
+                    worker.validate(payload, BATCH)
+                self.assertEqual(caught.exception.reason_code, expected_reason)
+
+    def test_validate_signal_optional_fields_have_specific_reason_codes(self):
+        cases = (
+            ({"event_key": None}, "signal_event_key_type"),
+            ({"event_key": "  "}, "signal_event_key_empty"),
+            ({"effective_date": 20261117}, "signal_effective_date_type"),
+            ({"effective_date": "not-a-date"}, "signal_effective_date_format"),
+        )
+        for updates, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                payload = {"signals": [{**SIGNAL, **updates}], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+                with self.assertRaises(worker.ResponseValidationError) as caught:
+                    worker.validate(payload, BATCH)
+                self.assertEqual(caught.exception.reason_code, expected_reason)
+
+        for optional_fields in ({}, {"effective_date": None}):
+            with self.subTest(optional_fields=optional_fields):
+                payload = {"signals": [{**SIGNAL, **optional_fields}], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+                self.assertEqual(len(worker.validate(payload, BATCH)["signals"]), 1)
+
+    def test_infer_unexpected_schema_validation_uses_safe_fallback(self):
+        payload = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
+        with patch.object(worker, "validate", side_effect=RuntimeError("private validation canary")):
+            diagnostic, output = self.rejected_diagnostic(response(json.dumps(payload)))
+        self.assertEqual(diagnostic["stage"], "schema")
+        self.assertEqual(diagnostic["reason"], "signal_validation_unexpected")
+        self.assertNotIn("private validation canary", output)
+
+    def test_infer_schema_diagnostic_excludes_model_and_material_values(self):
+        material_canary = "task19-material-canary"
+        payload = {
+            "signals": [{**SIGNAL, "topic": "task19-model-canary", "summary": " "}],
+            "skipped_material_ids": [2], "translations": TRANSLATIONS,
+        }
+        sensitive_batch = [{**item, "title": material_canary, "text": material_canary} for item in BATCH]
+        diagnostic, output = self.rejected_diagnostic(response(json.dumps(payload)), batch=sensitive_batch)
+        self.assertEqual(diagnostic["reason"], "signal_summary_empty")
+        self.assertNotIn("task19-model-canary", output)
+        self.assertNotIn(material_canary, output)
+
+    def test_process_schema_failure_does_not_import_or_acknowledge_queue(self):
+        payload = {
+            "signals": [{**SIGNAL, "summary": " "}],
+            "skipped_material_ids": [2], "translations": TRANSLATIONS,
+        }
+        with patch.object(worker, "open_url", return_value=response(json.dumps(payload))):
+            with self.assertRaisesRegex(RuntimeError, "queue unchanged"):
+                worker.process(self.conn, cycle_id=88)
+        self.import_mock.assert_not_called()
+        self.assertEqual(self.conn.transactions, 0)
 
     def test_infer_diagnostic_includes_safe_context_only(self):
         secret = "task11-api-secret-canary"

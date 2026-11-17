@@ -103,10 +103,13 @@ def validate(payload, batch):
         used.update(values)
     for signal in payload["signals"]:
         if not isinstance(signal, dict):
-            raise ResponseValidationError("schema_signal_fields")
+            raise ResponseValidationError("signal_not_object")
         for field in ("platform", "topic", "summary", "recommended_action"):
-            if not isinstance(signal.get(field), str) or not signal[field].strip():
-                raise ResponseValidationError("schema_signal_fields")
+            value = signal.get(field)
+            if not isinstance(value, str):
+                raise ResponseValidationError(f"signal_{field}_type")
+            if not value.strip():
+                raise ResponseValidationError(f"signal_{field}_empty")
         if not is_russian_text(signal["summary"]) or not is_russian_text(signal["recommended_action"]):
             raise ResponseValidationError("schema_language_signal")
         if type(signal.get("importance")) is not int or not 1 <= signal["importance"] <= 5:
@@ -114,16 +117,19 @@ def validate(payload, batch):
         try:
             platform = db.normalize_event_platform(signal["platform"])
         except (ValueError, TypeError):
-            raise ResponseValidationError("schema_signal_fields") from None
-        if "event_key" in signal and (not isinstance(signal["event_key"], str) or not signal["event_key"].strip()):
-            raise ResponseValidationError("schema_signal_fields")
+            raise ResponseValidationError("signal_platform_unsupported") from None
+        if "event_key" in signal:
+            if not isinstance(signal["event_key"], str):
+                raise ResponseValidationError("signal_event_key_type")
+            if not signal["event_key"].strip():
+                raise ResponseValidationError("signal_event_key_empty")
         if signal.get("effective_date") is not None:
             if not isinstance(signal["effective_date"], str):
-                raise ResponseValidationError("schema_signal_fields")
+                raise ResponseValidationError("signal_effective_date_type")
             try:
                 date.fromisoformat(signal["effective_date"])
             except ValueError:
-                raise ResponseValidationError("schema_signal_fields") from None
+                raise ResponseValidationError("signal_effective_date_format") from None
         values = signal.get("material_ids")
         if not values:
             raise ResponseValidationError("schema_material_ids")
@@ -244,8 +250,8 @@ def infer(batch, *, cycle_id=None):
             except ResponseValidationError as error:
                 rejected_response(stage="schema", reason=error.reason_code, cycle_id=cycle_id,
                                  model=model, batch_size=len(batch), http_status=http_status)
-            except (ValueError, UnicodeError, KeyError, IndexError, TypeError):
-                rejected_response(stage="schema", reason="schema_signal_fields", cycle_id=cycle_id,
+            except Exception:
+                rejected_response(stage="schema", reason="signal_validation_unexpected", cycle_id=cycle_id,
                                  model=model, batch_size=len(batch), http_status=http_status)
     except OSError:
         failure = RuntimeError("OpenRouter transport failed; queue unchanged")
