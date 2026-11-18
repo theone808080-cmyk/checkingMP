@@ -65,7 +65,8 @@ def strict_loads(value):
     return json.loads(value, parse_constant=reject_constant, object_pairs_hook=unique)
 
 
-def log_response_rejection(*, stage, reason, cycle_id, model, batch_size, http_status):
+def log_response_rejection(*, stage, reason, cycle_id, model, batch_size, http_status,
+                           finish_reason=None, completion_length=None, request_bytes=None):
     safe_model = model[:120] if isinstance(model, str) and all(ord(char) >= 32 for char in model) else "unknown"
     event = {
         "event": "openrouter_response_rejected",
@@ -77,13 +78,23 @@ def log_response_rejection(*, stage, reason, cycle_id, model, batch_size, http_s
     }
     if type(cycle_id) is int:
         event["cycle_id"] = cycle_id
+    if stage == "content":
+        allowed_finish_reasons = {"stop", "length", "content_filter", "tool_calls", "function_call"}
+        event["finish_reason"] = (finish_reason if isinstance(finish_reason, str) and
+                                   finish_reason in allowed_finish_reasons else "unknown")
+        if type(completion_length) is int and completion_length >= 0:
+            event["completion_length"] = completion_length
+        if type(request_bytes) is int and request_bytes >= 0:
+            event["request_bytes"] = request_bytes
     print("openrouter_diagnostic " + json.dumps(event, ensure_ascii=True, sort_keys=True), file=sys.stderr)
 
 
-def rejected_response(*, stage, reason, cycle_id, model, batch_size, http_status):
+def rejected_response(*, stage, reason, cycle_id, model, batch_size, http_status,
+                      finish_reason=None, completion_length=None, request_bytes=None):
     log_response_rejection(
         stage=stage, reason=reason, cycle_id=cycle_id, model=model,
-        batch_size=batch_size, http_status=http_status,
+        batch_size=batch_size, http_status=http_status, finish_reason=finish_reason,
+        completion_length=completion_length, request_bytes=request_bytes,
     )
     failure = RuntimeError("OpenRouter response invalid; queue unchanged")
     failure.failure_signature = "invalid_response"
@@ -103,10 +114,13 @@ def validate(payload, batch):
         used.update(values)
     for signal in payload["signals"]:
         if not isinstance(signal, dict):
-            raise ResponseValidationError("schema_signal_fields")
+            raise ResponseValidationError("signal_not_object")
         for field in ("platform", "topic", "summary", "recommended_action"):
-            if not isinstance(signal.get(field), str) or not signal[field].strip():
-                raise ResponseValidationError("schema_signal_fields")
+            value = signal.get(field)
+            if not isinstance(value, str):
+                raise ResponseValidationError(f"signal_{field}_type")
+            if not value.strip():
+                raise ResponseValidationError(f"signal_{field}_empty")
         if not is_russian_text(signal["summary"]) or not is_russian_text(signal["recommended_action"]):
             raise ResponseValidationError("schema_language_signal")
         if type(signal.get("importance")) is not int or not 1 <= signal["importance"] <= 5:
@@ -114,16 +128,19 @@ def validate(payload, batch):
         try:
             platform = db.normalize_event_platform(signal["platform"])
         except (ValueError, TypeError):
-            raise ResponseValidationError("schema_signal_fields") from None
-        if "event_key" in signal and (not isinstance(signal["event_key"], str) or not signal["event_key"].strip()):
-            raise ResponseValidationError("schema_signal_fields")
+            raise ResponseValidationError("signal_platform_unsupported") from None
+        if "event_key" in signal:
+            if not isinstance(signal["event_key"], str):
+                raise ResponseValidationError("signal_event_key_type")
+            if not signal["event_key"].strip():
+                raise ResponseValidationError("signal_event_key_empty")
         if signal.get("effective_date") is not None:
             if not isinstance(signal["effective_date"], str):
-                raise ResponseValidationError("schema_signal_fields")
+                raise ResponseValidationError("signal_effective_date_type")
             try:
                 date.fromisoformat(signal["effective_date"])
             except ValueError:
-                raise ResponseValidationError("schema_signal_fields") from None
+                raise ResponseValidationError("signal_effective_date_format") from None
         values = signal.get("material_ids")
         if not values:
             raise ResponseValidationError("schema_material_ids")
@@ -226,26 +243,32 @@ def infer(batch, *, cycle_id=None):
                     not isinstance(envelope["choices"][0].get("message"), dict)):
                 rejected_response(stage="envelope", reason="invalid_envelope_shape", cycle_id=cycle_id,
                                  model=model, batch_size=len(batch), http_status=http_status)
+            choice = envelope["choices"][0]
+            finish_reason = choice.get("finish_reason")
             message = envelope["choices"][0]["message"]
             if "content" not in message or message["content"] is None:
                 rejected_response(stage="content", reason="missing_content", cycle_id=cycle_id,
-                                 model=model, batch_size=len(batch), http_status=http_status)
+                                 model=model, batch_size=len(batch), http_status=http_status,
+                                 finish_reason=finish_reason, request_bytes=len(body))
             content = message["content"]
             if not isinstance(content, str):
                 rejected_response(stage="content", reason="content_not_text", cycle_id=cycle_id,
-                                 model=model, batch_size=len(batch), http_status=http_status)
+                                 model=model, batch_size=len(batch), http_status=http_status,
+                                 finish_reason=finish_reason, request_bytes=len(body))
             try:
                 decoded = strict_loads(content)
             except (ValueError, UnicodeError):
                 rejected_response(stage="content", reason="invalid_completion_json", cycle_id=cycle_id,
-                                 model=model, batch_size=len(batch), http_status=http_status)
+                                 model=model, batch_size=len(batch), http_status=http_status,
+                                 finish_reason=finish_reason, completion_length=len(content),
+                                 request_bytes=len(body))
             try:
                 payload = validate(decoded, batch)
             except ResponseValidationError as error:
                 rejected_response(stage="schema", reason=error.reason_code, cycle_id=cycle_id,
                                  model=model, batch_size=len(batch), http_status=http_status)
-            except (ValueError, UnicodeError, KeyError, IndexError, TypeError):
-                rejected_response(stage="schema", reason="schema_signal_fields", cycle_id=cycle_id,
+            except Exception:
+                rejected_response(stage="schema", reason="signal_validation_unexpected", cycle_id=cycle_id,
                                  model=model, batch_size=len(batch), http_status=http_status)
     except OSError:
         failure = RuntimeError("OpenRouter transport failed; queue unchanged")
