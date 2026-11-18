@@ -215,6 +215,37 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(diagnostic["reason"], "invalid_completion_json")
         self.assertNotIn("completion_canary", output)
 
+    def test_infer_invalid_completion_json_logs_response_metadata(self):
+        completion = '{"completion_canary":'
+        diagnostic, output = self.rejected_diagnostic(envelope({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"content": completion},
+            }],
+        }))
+        self.assertEqual(diagnostic["reason"], "invalid_completion_json")
+        self.assertEqual(diagnostic["finish_reason"], "length")
+        self.assertEqual(diagnostic["completion_length"], len(completion))
+        self.assertIsInstance(diagnostic["request_bytes"], int)
+        self.assertGreater(diagnostic["request_bytes"], 0)
+        self.assertNotIn(completion, output)
+
+    def test_infer_invalid_completion_json_uses_safe_metadata_fallbacks(self):
+        secret = "task20-completion-secret-canary"
+        completion = '{"' + secret
+        diagnostic, output = self.rejected_diagnostic(envelope({
+            "choices": [{
+                "finish_reason": {"unexpected": secret},
+                "message": {"content": completion},
+            }],
+        }), env={"OPENROUTER_API_KEY": secret})
+        self.assertEqual(diagnostic["reason"], "invalid_completion_json")
+        self.assertEqual(diagnostic["finish_reason"], "unknown")
+        self.assertEqual(diagnostic["completion_length"], len(completion))
+        self.assertIsInstance(diagnostic["request_bytes"], int)
+        self.assertGreater(diagnostic["request_bytes"], 0)
+        self.assertNotIn(secret, output)
+
     def test_infer_schema_failure_logs_allowlisted_reason(self):
         cases = (
             ({"signals": [], "skipped_material_ids": []}, "schema_required_fields"),
@@ -327,6 +358,9 @@ class WorkerTests(unittest.TestCase):
             "model": "test",
             "batch_size": 2,
             "http_status": 200,
+            "finish_reason": "unknown",
+            "completion_length": len('{"model_response_canary":"' + secret),
+            "request_bytes": unittest.mock.ANY,
         })
         for canary in (secret, material, "model_response_canary", "Bearer"):
             self.assertNotIn(canary, output)
