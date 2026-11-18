@@ -159,24 +159,33 @@ def validate_translations(translations, batch):
     translated = []
     translated_ids = set()
     for translation in translations:
-        if (not isinstance(translation, dict) or type(translation.get("material_id")) is not int or
-                not isinstance(translation.get("title_ru"), str) or not translation["title_ru"].strip() or
-                not isinstance(translation.get("text_ru"), str) or
-                len(translation["text_ru"]) > 400):
-            raise ResponseValidationError("schema_translation")
+        if not isinstance(translation, dict):
+            raise ResponseValidationError("translation_not_object")
+        if type(translation.get("material_id")) is not int:
+            raise ResponseValidationError("translation_material_id_type")
+        if not isinstance(translation.get("title_ru"), str):
+            raise ResponseValidationError("translation_title_type")
+        if not translation["title_ru"].strip():
+            raise ResponseValidationError("translation_title_empty")
+        if not isinstance(translation.get("text_ru"), str):
+            raise ResponseValidationError("translation_text_type")
+        if len(translation["text_ru"]) > 400:
+            raise ResponseValidationError("translation_text_too_long")
         material_id = translation["material_id"]
-        if material_id in translated_ids or material_id not in expected_translation_ids:
-            raise ResponseValidationError("schema_translation")
+        if material_id in translated_ids:
+            raise ResponseValidationError("translation_material_id_duplicate")
+        if material_id not in expected_translation_ids:
+            raise ResponseValidationError("translation_material_id_unexpected")
         material = next(item for item in batch if item["material_id"] == material_id)
         if (material.get("text") or "")[:400].strip() and not translation["text_ru"].strip():
-            raise ResponseValidationError("schema_translation")
+            raise ResponseValidationError("translation_text_empty_for_source")
         if (not is_russian_text(translation["title_ru"]) or
                 (translation["text_ru"].strip() and not is_russian_text(translation["text_ru"]))):
             raise ResponseValidationError("schema_language_translation")
         translated_ids.add(material_id)
         translated.append(translation)
     if translated_ids != expected_translation_ids:
-        raise ResponseValidationError("schema_translation")
+        raise ResponseValidationError("translation_missing")
     return translated
 
 

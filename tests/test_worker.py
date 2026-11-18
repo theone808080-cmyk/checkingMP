@@ -106,18 +106,23 @@ class WorkerTests(unittest.TestCase):
             {**TRANSLATIONS[0], "title_ru": long_title}, TRANSLATIONS[1]
         ]}, BATCH)
         self.assertEqual(long_title_result["translations"][0]["title_ru"], long_title)
-        invalid = (
-            [],
-            [TRANSLATIONS[0]],
-            [TRANSLATIONS[0], TRANSLATIONS[0]],
-            [TRANSLATIONS[0], {**TRANSLATIONS[1], "material_id": 99}],
-            [{**TRANSLATIONS[0], "title_ru": " "}, TRANSLATIONS[1]],
-            [{**TRANSLATIONS[0], "text_ru": ""}, TRANSLATIONS[1]],
-            [{**TRANSLATIONS[0], "text_ru": "x" * 401}, TRANSLATIONS[1]],
+        cases = (
+            ([None, TRANSLATIONS[1]], "translation_not_object"),
+            ([{**TRANSLATIONS[0], "material_id": "1"}, TRANSLATIONS[1]], "translation_material_id_type"),
+            ([{**TRANSLATIONS[0], "material_id": 99}, TRANSLATIONS[1]], "translation_material_id_unexpected"),
+            ([TRANSLATIONS[0], TRANSLATIONS[0]], "translation_material_id_duplicate"),
+            ([TRANSLATIONS[0]], "translation_missing"),
+            ([{**TRANSLATIONS[0], "title_ru": None}, TRANSLATIONS[1]], "translation_title_type"),
+            ([{**TRANSLATIONS[0], "title_ru": " "}, TRANSLATIONS[1]], "translation_title_empty"),
+            ([{**TRANSLATIONS[0], "text_ru": None}, TRANSLATIONS[1]], "translation_text_type"),
+            ([{**TRANSLATIONS[0], "text_ru": "x" * 401}, TRANSLATIONS[1]], "translation_text_too_long"),
+            ([{**TRANSLATIONS[0], "text_ru": ""}, TRANSLATIONS[1]], "translation_text_empty_for_source"),
         )
-        for translations in invalid:
-            with self.subTest(translations=translations), self.assertRaises(ValueError):
-                worker.validate({**valid, "translations": translations}, BATCH)
+        for translations, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                with self.assertRaises(worker.ResponseValidationError) as caught:
+                    worker.validate({**valid, "translations": translations}, BATCH)
+                self.assertEqual(caught.exception.reason_code, expected_reason)
 
     def test_rejects_predominantly_english_generated_content_before_import(self):
         english_translation = [
@@ -253,7 +258,7 @@ class WorkerTests(unittest.TestCase):
             ({"signals": [{**SIGNAL, "importance": 6}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_importance"),
             ({"signals": [{**SIGNAL, "material_ids": [3]}], "skipped_material_ids": [2], "translations": TRANSLATIONS}, "schema_material_ids"),
             ({"signals": [SIGNAL], "skipped_material_ids": [1], "translations": TRANSLATIONS}, "schema_material_ids"),
-            ({"signals": [SIGNAL], "skipped_material_ids": [2], "translations": [TRANSLATIONS[0]]}, "schema_translation"),
+            ({"signals": [SIGNAL], "skipped_material_ids": [2], "translations": [TRANSLATIONS[0]]}, "translation_missing"),
         )
         for payload, expected_reason in cases:
             with self.subTest(expected_reason=expected_reason):
@@ -267,8 +272,25 @@ class WorkerTests(unittest.TestCase):
                     "signal_recommended_action_type", "signal_recommended_action_empty",
                     "signal_event_key_type", "signal_event_key_empty", "signal_effective_date_type",
                     "signal_effective_date_format", "signal_validation_unexpected", "schema_importance",
-                    "schema_material_ids", "schema_translation",
+                    "schema_material_ids", "translation_not_object", "translation_material_id_type",
+                    "translation_material_id_unexpected", "translation_material_id_duplicate",
+                    "translation_missing", "translation_title_type", "translation_title_empty",
+                    "translation_text_type", "translation_text_too_long",
+                    "translation_text_empty_for_source", "schema_language_translation",
                 })
+
+    def test_translation_schema_diagnostic_excludes_translation_and_source_text(self):
+        source_canary = "task22-source-canary"
+        translation_canary = "task22-translation-canary"
+        sensitive_batch = [{**item, "title": source_canary, "text": source_canary} for item in BATCH]
+        payload = {
+            "signals": [SIGNAL], "skipped_material_ids": [2],
+            "translations": [{**TRANSLATIONS[0], "text_ru": translation_canary * 30}, TRANSLATIONS[1]],
+        }
+        diagnostic, output = self.rejected_diagnostic(response(json.dumps(payload)), batch=sensitive_batch)
+        self.assertEqual(diagnostic["reason"], "translation_text_too_long")
+        self.assertNotIn(source_canary, output)
+        self.assertNotIn(translation_canary, output)
 
     def test_validate_signal_required_fields_have_specific_reason_codes(self):
         cases = [(None, "signal_not_object")]
