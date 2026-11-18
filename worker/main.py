@@ -128,7 +128,7 @@ def validate(payload, batch):
         try:
             platform = db.normalize_event_platform(signal["platform"])
         except (ValueError, TypeError):
-            raise ResponseValidationError("signal_platform_unsupported") from None
+            platform = "Не определено"
         if "event_key" in signal:
             if not isinstance(signal["event_key"], str):
                 raise ResponseValidationError("signal_event_key_type")

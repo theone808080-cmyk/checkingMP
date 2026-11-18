@@ -283,8 +283,6 @@ class WorkerTests(unittest.TestCase):
             wrong_type = {**SIGNAL, field: 42}
             empty = {**SIGNAL, field: " "}
             cases.extend(((missing, type_code), (wrong_type, type_code), (empty, empty_code)))
-        cases.append(({**SIGNAL, "platform": "Unknown marketplace"}, "signal_platform_unsupported"))
-
         for signal, expected_reason in cases:
             with self.subTest(expected_reason=expected_reason, signal=signal):
                 payload = {"signals": [signal], "skipped_material_ids": [2], "translations": TRANSLATIONS}
@@ -433,13 +431,24 @@ class WorkerTests(unittest.TestCase):
             payload = {"signals": [{key: value for key, value in SIGNAL.items() if key != "importance"}], "skipped_material_ids": [], "translations": TRANSLATIONS}
             worker.validate(payload, BATCH)
 
-    def test_model_platforms_are_canonicalized_and_unknown_values_rejected(self):
+    def test_model_platforms_are_canonicalized_and_unknown_string_is_queued_for_review(self):
         for source, expected in (("Яндекс.Маркет", "Яндекс Маркет"), ("WB/Ozon", "Межплощадочная: Ozon, Wildberries")):
             payload = {"signals": [{**SIGNAL, "platform": source}], "skipped_material_ids": [], "translations": TRANSLATIONS}
             self.assertEqual(worker.validate(payload, BATCH)["signals"][0]["platform"], expected)
-        payload = {"signals": [{**SIGNAL, "platform": "unknown marketplace"}], "skipped_material_ids": [], "translations": TRANSLATIONS}
-        with self.assertRaises(ValueError):
-            worker.validate(payload, BATCH)
+        payload = {"signals": [{**SIGNAL, "platform": "unknown marketplace", "verification": "confirmed"}],
+                   "skipped_material_ids": [], "translations": TRANSLATIONS}
+        signal = worker.validate(payload, BATCH)["signals"][0]
+        self.assertEqual(signal["platform"], "Не определено")
+        self.assertEqual(signal["verification"], "needs_check")
+        self.assertEqual(worker.db.normalize_event_platform("Не определено"), "Не определено")
+
+    def test_unknown_platform_fallback_keeps_empty_and_non_string_values_invalid(self):
+        for value, expected_reason in ((" ", "signal_platform_empty"), (None, "signal_platform_type"), (42, "signal_platform_type")):
+            with self.subTest(value=value):
+                payload = {"signals": [{**SIGNAL, "platform": value}], "skipped_material_ids": [], "translations": TRANSLATIONS}
+                with self.assertRaises(worker.ResponseValidationError) as caught:
+                    worker.validate(payload, BATCH)
+                self.assertEqual(caught.exception.reason_code, expected_reason)
 
     def test_default_model(self):
         with patch.dict(worker.os.environ, {"OPENROUTER_API_KEY": "secret"}, clear=True):
