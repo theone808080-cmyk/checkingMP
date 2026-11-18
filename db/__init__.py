@@ -94,7 +94,7 @@ def sync_sources(conn) -> int:
             update_fields + " WHERE sources.managed_by = 'config'",
             source,
         )
-        if changed_url:
+        if changed_url and source["kind"] in ("rss", "html", "telegram"):
             domain = _candidate_domain(urlparse(source["url"]).hostname or "")
             conn.execute(
                 """INSERT INTO source_candidates

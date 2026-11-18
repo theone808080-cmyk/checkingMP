@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS sources (
     id SERIAL PRIMARY KEY,
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('rss', 'html', 'telegram')),
+    kind TEXT NOT NULL CHECK (kind IN ('rss', 'html', 'telegram', 'api')),
     url TEXT NOT NULL,
     trust TEXT NOT NULL CHECK (trust IN ('official', 'regulator', 'industry')),
     scope TEXT NOT NULL,
@@ -10,6 +10,23 @@ CREATE TABLE IF NOT EXISTS sources (
     last_checked_at TIMESTAMPTZ,
     last_error TEXT
 );
+
+-- Migrate older databases once; avoid dropping/revalidating this check on every collector cycle.
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='sources'::regclass AND conname='sources_kind_check'
+          AND pg_get_constraintdef(oid) NOT LIKE '%api%'
+    ) THEN
+        ALTER TABLE sources DROP CONSTRAINT sources_kind_check;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='sources'::regclass AND conname='sources_kind_check'
+    ) THEN
+        ALTER TABLE sources ADD CONSTRAINT sources_kind_check CHECK (kind IN ('rss', 'html', 'telegram', 'api'));
+    END IF;
+END $$;
 
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'industry';
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS managed_by TEXT NOT NULL DEFAULT 'config';

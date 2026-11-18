@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 import db
+from collector.ozon_api import OzonApiError, read_ozon_notifications
 from collector.safe_fetch import fetch_public
 
 SERVICE = "collector"
@@ -109,7 +110,8 @@ def read_telegram(url: str, *, safe: bool = False):
             yield {"url": link, "title": text[:160], "text": text[:4000], "published_at": None}
 
 
-READERS = {"rss": read_rss, "html": read_html, "telegram": read_telegram}
+READERS = {"rss": read_rss, "html": read_html, "telegram": read_telegram,
+           "api": lambda _url, **_kwargs: read_ozon_notifications()}
 
 
 def main(*, cycle_id: int | None = None) -> dict:
@@ -156,7 +158,8 @@ def main(*, cycle_id: int | None = None) -> dict:
                     failure_signature = hashlib.sha256(
                         f"{type(error).__name__}:{error}".encode("utf-8", errors="replace")
                     ).hexdigest()[:16]
-                    safe_error = f"Source read failed: {type(error).__name__} [{failure_signature}]"[:300]
+                    safe_error = (f"Source read failed: {error.safe_code}" if isinstance(error, OzonApiError)
+                                  else f"Source read failed: {type(error).__name__} [{failure_signature}]")[:300]
                     db.record_trace_attempt(
                         conn, cycle_id=cycle_id, run_id=run_id, source_id=source_id,
                         material_id=None, stage="collection", status="failed",
