@@ -415,6 +415,8 @@ _PLATFORM_CROSS_PATTERN = r'(межплощадочная)|(ozon.*(wildberries|w
 def normalize_event_platform(value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError('invalid event platform')
+    if value.strip().casefold() == 'не определено':
+        return 'Не определено'
     tokens = tuple(re.findall(r'\w+', value.casefold(), flags=re.UNICODE))
     phrases = (('all',), ('cross_platform',), ('cross', 'platform'), ('cross', 'marketplace'),
                ('все', 'маркетплейсы'), ('все', 'площадки'))
