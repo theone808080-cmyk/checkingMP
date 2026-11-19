@@ -221,10 +221,11 @@ class FeedPostgresTests(unittest.TestCase):
             SELECT id, %s, %s, %s, %s, %s, %s FROM sources WHERE code = %s""",
             ("https://example.org/" + title, title, "original " + title, published, collected, status, source))
 
-    def test_categories_map_all_nine_sources_and_safe_statuses(self):
+    def test_categories_map_all_twelve_sources_and_safe_statuses(self):
         rows = self.conn.execute("SELECT code, category FROM sources ORDER BY id").fetchall()
         self.assertEqual([category for _, category in rows],
-                         ["ozon", "wildberries", "yandex", "chestny_znak", "chestny_znak",
+                         ["ozon", "wildberries", "yandex", "ozon", "wildberries", "yandex",
+                          "chestny_znak", "chestny_znak",
                           "industry", "industry", "industry", "industry"])
         self.conn.execute("UPDATE sources SET last_error = 'secret error', last_checked_at = now() WHERE code = 'ozon_telegram'")
         statuses = db.feed_sources(self.conn)

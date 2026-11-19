@@ -23,3 +23,21 @@ def test_unknown_api_source_is_rejected_instead_of_using_ozon_by_accident():
 
     with pytest.raises(ValueError, match="unknown api source"):
         list(collector.read_api_source("unexpected_api_source"))
+
+
+def test_safe_source_error_formats_yandex_http_error_without_sensitive_details():
+    from collector import main as collector
+    from collector.yandex_market_api import YandexMarketApiError
+
+    error = YandexMarketApiError(
+        "http_400",
+        endpoint="/v2/businesses/{business_id}/offer-mappings",
+    )
+    error.provider_response = "businessId=918273 apiKey=secret-api-key provider says invalid offer"
+
+    message = collector._safe_source_error(error, "ignored-failure-signature")
+
+    assert message == "Source read failed: http_400 endpoint=/v2/businesses/{business_id}/offer-mappings"
+    assert "918273" not in message
+    assert "secret-api-key" not in message
+    assert "provider says invalid offer" not in message

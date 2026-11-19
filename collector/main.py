@@ -17,7 +17,7 @@ from collector.ozon_api import OzonApiError, read_ozon_notifications
 from collector.safe_fetch import fetch_public
 from collector.tariff_monitor import apply_tariff_snapshot
 from collector.wildberries_api import WildberriesTariffClient
-from collector.yandex_market_api import YandexMarketTariffClient
+from collector.yandex_market_api import YandexMarketApiError, YandexMarketTariffClient
 
 SERVICE = "collector"
 MAX_PER_SOURCE = 30
@@ -116,6 +116,19 @@ def read_telegram(url: str, *, safe: bool = False):
 TARIFF_API_SOURCES = {"wildberries_tariffs", "yandex_market_tariffs"}
 
 
+def _safe_source_error(error: Exception, failure_signature: str) -> str:
+    if isinstance(error, OzonApiError):
+        message = f"Source read failed: {error.safe_code}"
+    elif isinstance(error, YandexMarketApiError):
+        endpoint = f" endpoint={error.safe_endpoint}" if error.safe_endpoint else ""
+        provider_code = f" provider_code={error.safe_provider_code}" if error.safe_provider_code else ""
+        field_path = f" field={error.safe_field_path}" if error.safe_field_path else ""
+        message = f"Source read failed: {error.safe_code}{endpoint}{provider_code}{field_path}"
+    else:
+        message = f"Source read failed: {type(error).__name__} [{failure_signature}]"
+    return message[:300]
+
+
 def read_wildberries_tariffs():
     return WildberriesTariffClient.from_env().read_tariffs()
 
@@ -206,8 +219,7 @@ def main(*, cycle_id: int | None = None) -> dict:
                     failure_signature = hashlib.sha256(
                         f"{type(error).__name__}:{error}".encode("utf-8", errors="replace")
                     ).hexdigest()[:16]
-                    safe_error = (f"Source read failed: {error.safe_code}" if isinstance(error, OzonApiError)
-                                  else f"Source read failed: {type(error).__name__} [{failure_signature}]")[:300]
+                    safe_error = _safe_source_error(error, failure_signature)
                     db.record_trace_attempt(
                         conn, cycle_id=cycle_id, run_id=run_id, source_id=source_id,
                         material_id=None, stage="collection", status="failed",

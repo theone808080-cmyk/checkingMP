@@ -163,6 +163,144 @@ def test_yandex_offer_mapping_pagination_sends_next_page_token_in_query_paramete
     ]
 
 
+def test_yandex_calculator_offer_rejects_zero_category_id():
+    """Allowing zero sends an API-invalid calculator offer and causes a provider 400."""
+    from collector.yandex_market_api import _calculator_offer
+
+    offer = {
+        "offerId": "zero-category",
+        "marketCategoryId": 0,
+        "basicPrice": {"value": "100"},
+        "weightDimensions": {"length": "10", "width": "10", "height": "10", "weight": "1"},
+    }
+
+    assert _calculator_offer(offer, None) is None
+
+
+def test_yandex_calculator_offer_rejects_zero_basic_price():
+    """A zero price is invalid for the Yandex tariff calculator."""
+    from collector.yandex_market_api import _calculator_offer
+
+    offer = {
+        "offerId": "zero-price",
+        "marketCategoryId": 1,
+        "basicPrice": {"value": "0"},
+        "weightDimensions": {"length": "10", "width": "10", "height": "10", "weight": "1"},
+    }
+
+    assert _calculator_offer(offer, None) is None
+
+
+def test_yandex_400_reports_sanitized_offer_mapping_endpoint_without_secret_or_body():
+    """Diagnostics need the failing route, but must not retain an ID, key, or provider text."""
+    from collector.yandex_market_api import YandexMarketApiError, YandexMarketTariffClient
+
+    raw_provider_body = "provider says key=yandex-test-key for business 987654"
+    client = YandexMarketTariffClient("yandex-test-key", transport=FixtureTransport([
+        FakeResponse(400, {"errors": [{"message": raw_provider_body}]}),
+    ]))
+
+    with pytest.raises(YandexMarketApiError) as error:
+        client.list_offer_mappings(987654)
+
+    message = str(error.value)
+    assert message == "http_400:/v2/businesses/{business_id}/offer-mappings"
+    assert "987654" not in message
+    assert "yandex-test-key" not in message
+    assert raw_provider_body not in message
+
+
+def test_yandex_calculator_400_exposes_only_sanitized_provider_code_and_field_path():
+    """Raw calculator failures must not expose offer/business IDs, keys, or provider text."""
+    from collector.yandex_market_api import YandexMarketApiError, YandexMarketTariffClient
+
+    api_key = "yandex-test-key"
+    offer_id = 123456
+    business_id = 987654
+    raw_provider_message = (
+        f"Illegal input at 'offers[0].categoryId' for offer {offer_id}, "
+        f"business {business_id}, key {api_key}"
+    )
+    client = YandexMarketTariffClient(api_key, transport=FixtureTransport([
+        FakeResponse(400, {"errors": [{"code": "ILLEGAL_INPUT", "message": raw_provider_message}]}),
+    ]))
+
+    with pytest.raises(YandexMarketApiError) as error:
+        client.calculate_tariffs(
+            {"campaignId": business_id, "currency": "RUR"},
+            [{"categoryId": 1, "price": 100, "length": 1, "width": 1, "height": 1, "weight": 1, "quantity": 1}],
+        )
+
+    diagnostic = vars(error.value)
+    assert error.value.safe_code == "http_400"
+    assert error.value.safe_endpoint == "/v2/tariffs/calculate"
+    assert error.value.safe_provider_code == "ILLEGAL_INPUT"
+    assert error.value.safe_field_path == "offers[].categoryId"
+    diagnostic_text = "\n".join((str(error.value), *(str(value) for value in diagnostic.values())))
+    assert raw_provider_message not in diagnostic_text
+    assert str(offer_id) not in diagnostic_text
+    assert str(business_id) not in diagnostic_text
+    assert api_key not in diagnostic_text
+
+
+def test_yandex_calculator_400_maps_generic_allowlisted_field_without_retaining_provider_details():
+    """A generic calculator field name must become a safe path without retaining provider details."""
+    from collector.yandex_market_api import YandexMarketApiError, YandexMarketTariffClient
+
+    api_key = "yandex-test-key"
+    offer_id = 456
+    raw_provider_message = f"Invalid categoryId value for offer {offer_id} and key {api_key}"
+    client = YandexMarketTariffClient(api_key, transport=FixtureTransport([
+        FakeResponse(400, {"errors": [{"code": "BAD_REQUEST", "message": raw_provider_message}]}),
+    ]))
+
+    with pytest.raises(YandexMarketApiError) as error:
+        client.calculate_tariffs(
+            {"campaignId": 7, "currency": "RUR"},
+            [{"categoryId": 1, "price": 100, "length": 1, "width": 1, "height": 1, "weight": 1, "quantity": 1}],
+        )
+
+    diagnostic = vars(error.value)
+    assert error.value.safe_code == "http_400"
+    assert error.value.safe_endpoint == "/v2/tariffs/calculate"
+    assert error.value.safe_provider_code == "BAD_REQUEST"
+    assert error.value.safe_field_path == "offers[].categoryId"
+    diagnostic_text = "\n".join((str(error.value), *(str(value) for value in diagnostic.values())))
+    assert raw_provider_message not in diagnostic_text
+    assert str(offer_id) not in diagnostic_text
+    assert api_key not in diagnostic_text
+
+
+@pytest.mark.parametrize(
+    ("provider_code", "expected_safe_provider_code"),
+    [
+        ("SECRET_API_KEY_123", None),
+        (987654, None),
+        ("BAD_REQUEST", "BAD_REQUEST"),
+    ],
+)
+def test_yandex_calculator_400_keeps_only_allowlisted_provider_codes(provider_code, expected_safe_provider_code):
+    """Unknown provider codes can contain secrets or IDs and must not become diagnostics."""
+    from collector.yandex_market_api import YandexMarketApiError, YandexMarketTariffClient
+
+    client = YandexMarketTariffClient("yandex-test-key", transport=FixtureTransport([
+        FakeResponse(400, {"errors": [{"code": provider_code, "message": "invalid calculator request"}]}),
+    ]))
+
+    with pytest.raises(YandexMarketApiError) as error:
+        client.calculate_tariffs(
+            {"campaignId": 7, "currency": "RUR"},
+            [{"categoryId": 1, "price": 100, "length": 1, "width": 1, "height": 1, "weight": 1, "quantity": 1}],
+        )
+
+    diagnostic_text = "\n".join((str(error.value), *(str(value) for value in vars(error.value).values())))
+    assert error.value.safe_provider_code == expected_safe_provider_code
+    if expected_safe_provider_code is None:
+        assert str(provider_code) not in diagnostic_text
+    else:
+        assert expected_safe_provider_code in diagnostic_text
+
+
 @pytest.mark.parametrize("status", [401, 403, 429])
 def test_yandex_client_returns_safe_failure_codes_for_access_or_limit_errors(status):
     """Authorization text from the provider must not reach a project log or finding."""

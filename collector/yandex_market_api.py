@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,14 +16,37 @@ TOKEN_ENV = "YANDEX_MARKET_API_KEY"
 REQUEST_TIMEOUT = 30
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_OFFERS_PER_TARIFF_REQUEST = 200
+MAX_ERROR_RESPONSE_BYTES = 64_000
+_SAFE_PROVIDER_ERROR_CODES = {"BAD_REQUEST", "ILLEGAL_INPUT", "UNAUTHORIZED"}
+_SAFE_ERROR_FIELDS = {
+    "categoryId", "price", "length", "width", "height", "weight", "quantity",
+    "campaignId", "sellingProgram", "frequency", "paymentDelayWeeks", "currency",
+}
+_PARAMETER_ERROR_FIELDS = {"campaignId", "sellingProgram", "frequency", "paymentDelayWeeks", "currency"}
 
 
 class YandexMarketApiError(RuntimeError):
     """Safe API error code; raw responses and credentials are never retained."""
 
-    def __init__(self, code: str):
-        super().__init__(code)
+    def __init__(self, code: str, *, endpoint: str | None = None,
+                 provider_code: str | None = None, field_path: str | None = None):
+        safe_endpoint = endpoint if endpoint in {
+            "/v2/campaigns",
+            "/v2/businesses/{business_id}/offer-mappings",
+            "/v2/tariffs/calculate",
+        } else None
+        safe_provider_code = (provider_code if isinstance(provider_code, str)
+                              and provider_code in _SAFE_PROVIDER_ERROR_CODES else None)
+        safe_field_path = field_path if _is_safe_field_path(field_path) else None
+        message = f"{code}:{safe_endpoint}" if safe_endpoint and code.startswith("http_") else code
+        diagnostics = [value for value in (safe_provider_code, safe_field_path) if value]
+        if diagnostics:
+            message += " [" + " ".join(diagnostics) + "]"
+        super().__init__(message)
         self.safe_code = code
+        self.safe_endpoint = safe_endpoint
+        self.safe_provider_code = safe_provider_code
+        self.safe_field_path = safe_field_path
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -72,26 +96,34 @@ class YandexMarketTariffClient:
     def _request(self, method: str, path: str, *, params: dict | None = None, payload: dict | None = None):
         if not self._api_key:
             raise YandexMarketApiError("credentials_missing")
+        safe_endpoint = _safe_endpoint(path)
         headers = {"Api-Key": self._api_key, "Content-Type": "application/json"}
         url = f"{API_ROOT}{path}"
-        if method == "GET":
-            response = self._transport.get(url, headers=headers, params=params or {}, timeout=REQUEST_TIMEOUT)
-        else:
-            query = urllib.parse.urlencode({key: value for key, value in (params or {}).items()
-                                            if value is not None})
-            request_url = f"{url}?{query}" if query else url
-            response = self._transport.post(request_url, headers=headers, payload=payload or {},
-                                            timeout=REQUEST_TIMEOUT)
+        try:
+            if method == "GET":
+                response = self._transport.get(url, headers=headers, params=params or {}, timeout=REQUEST_TIMEOUT)
+            else:
+                query = urllib.parse.urlencode({key: value for key, value in (params or {}).items()
+                                                if value is not None})
+                request_url = f"{url}?{query}" if query else url
+                response = self._transport.post(request_url, headers=headers, payload=payload or {},
+                                                timeout=REQUEST_TIMEOUT)
+        except YandexMarketApiError as error:
+            raise YandexMarketApiError(error.safe_code, endpoint=safe_endpoint) from None
         status = getattr(response, "status", getattr(response, "code", 200))
         if status in (401, 403):
             _close(response)
-            raise YandexMarketApiError("authorization_failed")
+            raise YandexMarketApiError("authorization_failed", endpoint=safe_endpoint)
         if status == 429:
             _close(response)
-            raise YandexMarketApiError("rate_limited")
+            raise YandexMarketApiError("rate_limited", endpoint=safe_endpoint)
         if status < 200 or status >= 300:
+            provider_code, field_path = _safe_error_diagnostics(response)
             _close(response)
-            raise YandexMarketApiError(f"http_{status}")
+            raise YandexMarketApiError(
+                f"http_{status}", endpoint=safe_endpoint,
+                provider_code=provider_code, field_path=field_path,
+            )
         try:
             if callable(getattr(response, "read", None)):
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
@@ -100,13 +132,13 @@ class YandexMarketTariffClient:
         finally:
             _close(response)
         if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
-            raise YandexMarketApiError("invalid_response")
+            raise YandexMarketApiError("invalid_response", endpoint=safe_endpoint)
         try:
             result = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            raise YandexMarketApiError("invalid_response") from None
+            raise YandexMarketApiError("invalid_response", endpoint=safe_endpoint) from None
         if not isinstance(result, dict):
-            raise YandexMarketApiError("invalid_response")
+            raise YandexMarketApiError("invalid_response", endpoint=safe_endpoint)
         return result
 
     def list_campaigns(self) -> list[dict]:
@@ -243,6 +275,67 @@ def _positive_int(value):
     return parsed if parsed > 0 else None
 
 
+def _safe_endpoint(path: str) -> str:
+    """Return a route template without account IDs or query parameters."""
+    if path == "/v2/campaigns":
+        return path
+    if path.startswith("/v2/businesses/") and path.endswith("/offer-mappings"):
+        return "/v2/businesses/{business_id}/offer-mappings"
+    if path == "/v2/tariffs/calculate":
+        return path
+    return "/unknown"
+
+
+def _safe_error_diagnostics(response) -> tuple[str | None, str | None]:
+    """Extract only an allowlisted provider code and field path from an error body."""
+    try:
+        reader = getattr(response, "read", None)
+        raw = reader(MAX_ERROR_RESPONSE_BYTES + 1) if callable(reader) else getattr(response, "body", b"")
+        if not isinstance(raw, bytes) or len(raw) > MAX_ERROR_RESPONSE_BYTES:
+            return None, None
+        payload = json.loads(raw.decode("utf-8"))
+    except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, None
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    if not isinstance(errors, list):
+        return None, None
+    for item in errors:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code")
+        safe_code = code if isinstance(code, str) and code in _SAFE_PROVIDER_ERROR_CODES else None
+        message = item.get("message")
+        field_path = None
+        if isinstance(message, str):
+            match = re.search(r"offers\[\d+\]\.([A-Za-z]+)|parameters\.([A-Za-z]+)", message)
+            if match:
+                field = match.group(1) or match.group(2)
+                if field in _SAFE_ERROR_FIELDS:
+                    field_path = f"offers[].{field}" if match.group(1) else f"parameters.{field}"
+            if field_path is None:
+                for field in (
+                    "categoryId", "campaignId", "sellingProgram", "paymentDelayWeeks",
+                    "frequency", "currency", "price", "length", "width", "height", "weight", "quantity",
+                ):
+                    if re.search(rf"\b{field}\b", message, flags=re.IGNORECASE):
+                        prefix = "parameters" if field in _PARAMETER_ERROR_FIELDS else "offers[]"
+                        field_path = f"{prefix}.{field}"
+                        break
+        if safe_code or field_path:
+            return safe_code, field_path
+    return None, None
+
+
+def _is_safe_field_path(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value.startswith("offers[]."):
+        return value.removeprefix("offers[].") in _SAFE_ERROR_FIELDS
+    if value.startswith("parameters."):
+        return value.removeprefix("parameters.") in _SAFE_ERROR_FIELDS
+    return False
+
+
 def _offer_in_campaign(offer: dict, campaign_id: int) -> bool:
     campaigns = offer.get("campaigns")
     if not isinstance(campaigns, list):
@@ -260,13 +353,15 @@ def _calculator_offer(offer: dict, mapping: object) -> tuple[dict, str] | None:
     dims = offer.get("weightDimensions")
     price = offer.get("basicPrice")
     category = offer.get("marketCategoryId")
-    if not isinstance(category, int) or isinstance(category, bool):
+    if not isinstance(category, int) or isinstance(category, bool) or category <= 0:
         category = mapping.get("marketCategoryId") if isinstance(mapping, dict) else None
-    if not isinstance(dims, dict) or not isinstance(price, dict) or not isinstance(category, int):
+    if (not isinstance(dims, dict) or not isinstance(price, dict)
+            or not isinstance(category, int) or isinstance(category, bool) or category <= 0):
         return None
     values = {name: _decimal_text(dims.get(name)) for name in ("length", "width", "height", "weight")}
     amount = _decimal_text(price.get("value"))
-    if amount is None or any(value is None or Decimal(value) <= 0 for value in values.values()):
+    if (amount is None or Decimal(amount) <= 0
+            or any(value is None or Decimal(value) <= 0 for value in values.values())):
         return None
     offer_id = offer.get("offerId")
     if not isinstance(offer_id, str) or not offer_id.strip():
