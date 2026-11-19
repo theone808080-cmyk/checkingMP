@@ -887,6 +887,7 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
                   COALESCE(qa.summary_audit, 'not_checked') AS summary_audit,
                   COALESCE(qa.recommendation_audit, 'not_checked') AS recommendation_audit,
                   (frs.event_id IS NOT NULL) AS read,
+                  ff.feedback,
                   json_agg(json_build_object('name', s.name, 'trust', s.trust, 'category', s.category, 'url', m.url,
                     'published_at', m.published_at, 'collected_at', m.collected_at)
                     ORDER BY COALESCE(m.published_at, m.collected_at) DESC, m.id DESC) AS sources
@@ -898,15 +899,16 @@ def feed_findings(conn, period: str = 'all', platform: str = 'all', importance: 
             LEFT JOIN relevance_by_event ev ON ev.event_id=e.id
             LEFT JOIN quality_by_finding qa ON qa.finding_id=e.id
             LEFT JOIN finding_read_state frs ON frs.event_id=e.id
+            LEFT JOIN finding_feedback ff ON ff.event_id=e.id
             """ + page_read_filter + """
             GROUP BY e.id, page.ordinal, ev.classification, ev.relevance, ev.seller_impact,
-                     qa.summary_audit, qa.recommendation_audit, frs.event_id
+                     qa.summary_audit, qa.recommendation_audit, frs.event_id, ff.feedback
             ORDER BY page.ordinal""",
          (active_relevance_version(), _PLATFORM_SPECIFIC_PATTERN, general_platforms, _PLATFORM_CROSS_PATTERN, page_ids),
     ).fetchall()
     names = ('id', 'platform', 'topic', 'importance', 'seller_impact', 'summary', 'recommended_action',
              'verification', 'effective_date', 'updated_at', 'specificity', 'classification', 'relevance',
-            'summary_audit', 'recommendation_audit', 'read', 'sources')
+            'summary_audit', 'recommendation_audit', 'read', 'feedback', 'sources')
     findings = [dict(zip(names, row)) for row in rows]
     next_cursor = _encode_findings_cursor(snapshot_id, offset + limit, filter_hash) if has_more else None
     return {'findings': findings, 'total': total, 'next_cursor': next_cursor}
@@ -927,6 +929,20 @@ def set_finding_read(conn, finding_id: int, read: bool) -> dict[str, Any]:
     else:
         conn.execute('DELETE FROM finding_read_state WHERE event_id=%s', (finding_id,))
     return {'id': finding_id, 'read': read}
+
+
+def set_finding_feedback(conn, finding_id: int, feedback: str) -> dict[str, Any]:
+    if type(finding_id) is not int or finding_id < 1 or feedback not in ('useful', 'not_suitable'):
+        raise ValueError('invalid finding feedback')
+    exists = conn.execute('SELECT 1 FROM events WHERE id=%s', (finding_id,)).fetchone()
+    if exists is None:
+        raise ValueError('finding not found')
+    conn.execute(
+        """INSERT INTO finding_feedback(event_id, feedback) VALUES (%s, %s)
+           ON CONFLICT(event_id) DO UPDATE SET feedback=EXCLUDED.feedback, updated_at=now()""",
+        (finding_id, feedback),
+    )
+    return {'id': finding_id, 'feedback': feedback}
 
 
 def feed_sources(conn) -> list[dict[str, Any]]:

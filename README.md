@@ -22,6 +22,8 @@
 
 Задача 18 открывает Mini App со свежими непрочитанными находками за 72 часа; прочитанное можно убрать в архив и вернуть обратно. Устаревшие публикации не включаются в счётчик Telegram-уведомления. Спецификация и проверки: [`docs/superpowers/specs/2026-11-16-unread-news-feed/`](docs/superpowers/specs/2026-11-16-unread-news-feed/).
 
+Задача 25 добавляет в карточки находок кнопки «Полезно» и «Не подходит». Последняя оценка владельца сохраняется в PostgreSQL и не подменяет подтверждение достоверности события или автоматическую оценку модели. [Спецификация, план и чек-лист](docs/superpowers/specs/2026-11-19-finding-usefulness-feedback/).
+
 
 
 ## Состав проекта
@@ -49,13 +51,16 @@
 | [`docs/superpowers/specs/2026-11-13-useful-marketplace-feed/spec.md`](docs/superpowers/specs/2026-11-13-useful-marketplace-feed/spec.md) | Утверждённая задача 15: полезная лента новостей маркетплейсов |
 | [`docs/superpowers/specs/2026-11-13-useful-marketplace-feed/plan.md`](docs/superpowers/specs/2026-11-13-useful-marketplace-feed/plan.md) | План реализации задачи 15 |
 | [`docs/superpowers/specs/2026-11-13-useful-marketplace-feed/tasks.md`](docs/superpowers/specs/2026-11-13-useful-marketplace-feed/tasks.md) | Чек-лист тестирования и выполнения задачи 15 |
+| [`docs/superpowers/specs/2026-11-19-finding-usefulness-feedback/spec.md`](docs/superpowers/specs/2026-11-19-finding-usefulness-feedback/spec.md) | Утверждённая задача 25: оценка полезности ИИ-находок владельцем |
+| [`docs/superpowers/specs/2026-11-19-finding-usefulness-feedback/plan.md`](docs/superpowers/specs/2026-11-19-finding-usefulness-feedback/plan.md) | План реализации задачи 25 |
+| [`docs/superpowers/specs/2026-11-19-finding-usefulness-feedback/tasks.md`](docs/superpowers/specs/2026-11-19-finding-usefulness-feedback/tasks.md) | Чек-лист тестирования и выполнения задачи 25 |
 | [`docs/superpowers/specs/2026-11-13-clear-findings-feed/spec.md`](docs/superpowers/specs/2026-11-13-clear-findings-feed/spec.md) | Утвержденная SPEC задачи 16: читаемые статусы, русскоязычная обработка новых материалов и осторожная обработка точных дублей |
 | `docs/superpowers/plans/2026-11-09-russian-translations.md` | План реализации задачи 2 |
 | `main.py` | Командный интерфейс цикла, ручной проверки, веб-сервера и уведомлений |
 | `config/` | Реестр источников и пример JSON для ручного импорта |
 | `collector/` | Сбор RSS, публичных HTML-лент и Telegram preview |
 | `worker/` | OpenRouter, перевод новых материалов, теневой фильтр релевантности и проверка ответа модели |
-| `db/` | Схема PostgreSQL, материалы и переводы, находки, циклы, append-only трассировка и оценки релевантности |
+| `db/` | Схема PostgreSQL, материалы и переводы, находки, циклы, трассировка, оценки релевантности и обратная связь владельца |
 | `web/` | Страница мониторинга и Telegram Mini App |
 | `db/impacts.py` | Карточки влияния новости на склад и решения владельца |
 | `notifier/` | Учёт новых материалов и уведомления через Telegram Bot API |

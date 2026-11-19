@@ -21,6 +21,15 @@ from source_discovery.probe import probe_source
 from web import telegram_auth
 
 
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
 def render(conn, filters: dict[str, str]) -> str:
     counts = db.health(conn)
     backup = db.latest_backup_status(conn)
@@ -392,6 +401,37 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(400, {"error": "invalid request"})
             return
         parsed = urlparse(self.path)
+        feedback_match = re.fullmatch(r"/api/findings/([1-9][0-9]{0,17})/feedback", parsed.path)
+        if feedback_match:
+            if not (self.authorized() or self.session_authorized()):
+                self.reject_auth()
+                return
+            if parsed.query or parsed.fragment or not self.same_origin():
+                self.json_response(403, {"error": "same-origin request required"})
+                return
+            try:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 1024
+                        or self.headers.get("Transfer-Encoding")
+                        or self.headers.get_content_type() != "application/json"):
+                    raise ValueError("invalid request body")
+                payload = json.loads(self.rfile.read(int(lengths[0])).decode("utf-8"),
+                                     object_pairs_hook=_unique_json_object)
+                if (not isinstance(payload, dict) or set(payload) != {"feedback"}
+                        or not isinstance(payload["feedback"], str)
+                        or payload["feedback"] not in ("useful", "not_suitable")):
+                    raise ValueError("invalid request schema")
+                with db.connect() as conn:
+                    result = db.set_finding_feedback(conn, int(feedback_match.group(1)), payload["feedback"])
+                self.json_response(200, result)
+            except ValueError as error:
+                status = 404 if str(error) == "finding not found" else 400
+                self.json_response(status, {"error": "finding not found" if status == 404 else "invalid request"})
+            except (TypeError, UnicodeError, json.JSONDecodeError):
+                self.json_response(400, {"error": "invalid request"})
+            except Exception:
+                self.json_response(500, {"error": "service unavailable"})
+            return
         read_match = re.fullmatch(r"/api/findings/([1-9][0-9]{0,17})/read", parsed.path)
         if read_match:
             if not (self.authorized() or self.session_authorized()):

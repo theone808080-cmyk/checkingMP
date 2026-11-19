@@ -279,6 +279,12 @@ CREATE TABLE IF NOT EXISTS finding_read_state (
     read_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS finding_feedback (
+    event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    feedback TEXT NOT NULL CHECK (feedback IN ('useful', 'not_suitable')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'events'::regclass AND conname = 'events_seller_impact_allowed_check') THEN

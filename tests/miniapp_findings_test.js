@@ -33,6 +33,13 @@ async function fetch(url, options) {
   if (url === '/api/findings/7/read') {
     return {ok:true, async json() { return {id:7, read:true}; }};
   }
+  if (url === '/api/findings/7/feedback' && options && options.method === 'POST') {
+    const payload = JSON.parse(options.body);
+    return {ok:true, async json() { return {id:7, feedback:payload.feedback}; }};
+  }
+  if (url === '/api/findings/8/feedback' && options && options.method === 'POST') {
+    return {ok:false, async json() { return {error:'service unavailable'}; }};
+  }
   if (url === '/api/findings/7/impacts' && options && options.method === 'POST') {
     return {ok:true, async json() { return {id:71, platform:'Ozon', object_type:'marketplace', object_name:null,
       change_type:null, effective_date:null, processes:[], consequence:draftConsequence, source_url:'https://example.org/source',
@@ -71,12 +78,14 @@ async function fetch(url, options) {
         recommended_action:'Review shipments', verification:'needs_check', effective_date:null,
         updated_at:'2026-11-09T09:00:00Z', specificity:1, classification:'seller_action_or_risk', relevance:'relevant',
         summary_audit:'ok', recommendation_audit:'review',
+        feedback:'useful',
         sources:[{name:'Official Ozon',trust:'official',category:'ozon',url:'https://example.org/source',published_at:null,collected_at:'2026-11-09T09:00:00Z'}]
       }, {
         id:8, platform:'Ozon', topic:'rules', importance:4, seller_impact:'unclear', summary:'Changed acceptance schedule',
         recommended_action:'Read the source', verification:'needs_check', effective_date:null,
         updated_at:'2026-11-09T08:00:00Z', specificity:1, classification:'not_assessed', relevance:'not_assessed',
         summary_audit:'not_checked', recommendation_audit:'not_checked', sources:[]
+        ,feedback:null
       }], total:1, next_cursor:requests.filter(value => value.startsWith('/api/findings?')).length === 1 ? 'find-next' : null
     }; }};
   }
@@ -122,6 +131,23 @@ function collect(node) { return [node, ...(node.children || []).flatMap(collect)
   assert.strictEqual(attention.length, 1, 'only stored review or issue results should create a visible attention marker');
   assert.strictEqual(attention[0].textContent, 'Есть замечание');
   assert.ok(nodes.some(node => node.className === 'importance-square importance-5'));
+  const usefulButton = nodes.find(node => node.tagName === 'button' && node.textContent === 'Полезно');
+  const unsuitableButton = nodes.find(node => node.tagName === 'button' && node.textContent === 'Не подходит');
+  assert.ok(usefulButton && unsuitableButton, 'each finding should offer useful and not suitable feedback actions');
+  assert.strictEqual(usefulButton.attributes['aria-pressed'], 'true', 'stored useful feedback should be shown as selected');
+  await unsuitableButton.dispatch('click');
+  await tick();
+  const feedbackRequest = requestOptions.find(request => request.url === '/api/findings/7/feedback');
+  assert.ok(feedbackRequest, 'feedback should persist through the dedicated finding endpoint');
+  assert.deepStrictEqual(JSON.parse(feedbackRequest.options.body), {feedback:'not_suitable'});
+  assert.strictEqual(unsuitableButton.attributes['aria-pressed'], 'true', 'owner can change the previous feedback choice');
+  const findingCards = nodes.filter(node => node.className === 'card finding-card');
+  const secondFeedbackButton = collect(findingCards[1]).find(node => node.tagName === 'button' && node.textContent === 'Полезно');
+  assert.ok(secondFeedbackButton, 'unrated finding should also offer feedback actions');
+  await secondFeedbackButton.dispatch('click');
+  await tick();
+  const secondFeedbackStatus = collect(findingCards[1]).find(node => node.className === 'meta finding-feedback-status');
+  assert.ok(secondFeedbackStatus.textContent.includes('Не удалось сохранить оценку'), 'failed feedback must be visible and retryable');
   assert.ok(nodes.some(node => node.href === 'https://example.org/source'));
   assert.strictEqual(el('findings').hidden, false);
   const findingDetails = nodes.filter(node => node.className === 'finding-details');
