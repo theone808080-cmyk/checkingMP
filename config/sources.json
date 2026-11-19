@@ -1,5 +1,7 @@
 [
   {"code":"ozon_seller_api_notifications","category":"ozon","name":"Ozon Seller API — уведомления продавцам","kind":"api","url":"https://api-seller.ozon.ru","trust":"official","scope":"Ozon: официальные уведомления продавцам, изменения и материалы Seller API"},
+  {"code":"wildberries_tariffs","category":"wildberries","name":"Wildberries Seller API — тарифы","kind":"api","url":"https://common-api.wildberries.ru","trust":"official","scope":"Wildberries: read-only тарифы складов, логистики, хранения и комиссий"},
+  {"code":"yandex_market_tariffs","category":"yandex","name":"Яндекс Маркет Partner API — расчёт тарифов","kind":"api","url":"https://api.partner.market.yandex.ru","trust":"official","scope":"Яндекс Маркет: приблизительный расчёт стоимости услуг по доступному ассортименту"},
   {"code":"ozon_telegram","category":"ozon","name":"Ozon Marketplace — Telegram","kind":"telegram","url":"https://t.me/s/ozonmarketplace","trust":"official","scope":"Ozon: логистика, тарифы, акции, правила продавцов"},
   {"code":"wb_telegram","category":"wildberries","name":"Wildberries для продавцов — Telegram","kind":"telegram","url":"https://t.me/s/wbsellerofficial","trust":"official","scope":"Wildberries: условия, логистика, штрафы, реклама"},
   {"code":"yandex_market_telegram","category":"yandex","name":"Яндекс Маркет для продавцов — Telegram","kind":"telegram","url":"https://t.me/s/market_marketplace","trust":"official","scope":"Яндекс Маркет: продажи, поставки, продвижение"},

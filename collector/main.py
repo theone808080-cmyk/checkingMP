@@ -15,6 +15,9 @@ from urllib.parse import urljoin
 import db
 from collector.ozon_api import OzonApiError, read_ozon_notifications
 from collector.safe_fetch import fetch_public
+from collector.tariff_monitor import apply_tariff_snapshot
+from collector.wildberries_api import WildberriesTariffClient
+from collector.yandex_market_api import YandexMarketTariffClient
 
 SERVICE = "collector"
 MAX_PER_SOURCE = 30
@@ -110,8 +113,30 @@ def read_telegram(url: str, *, safe: bool = False):
             yield {"url": link, "title": text[:160], "text": text[:4000], "published_at": None}
 
 
-READERS = {"rss": read_rss, "html": read_html, "telegram": read_telegram,
-           "api": lambda _url, **_kwargs: read_ozon_notifications()}
+TARIFF_API_SOURCES = {"wildberries_tariffs", "yandex_market_tariffs"}
+
+
+def read_wildberries_tariffs():
+    return WildberriesTariffClient.from_env().read_tariffs()
+
+
+def read_yandex_market_tariffs():
+    return YandexMarketTariffClient.from_env().read_tariffs()
+
+
+def read_api_source(source_code: str):
+    readers = {
+        "ozon_seller_api_notifications": read_ozon_notifications,
+        "wildberries_tariffs": read_wildberries_tariffs,
+        "yandex_market_tariffs": read_yandex_market_tariffs,
+    }
+    reader = readers.get(source_code)
+    if reader is None:
+        raise ValueError("unknown api source")
+    return reader()
+
+
+READERS = {"rss": read_rss, "html": read_html, "telegram": read_telegram}
 
 
 def main(*, cycle_id: int | None = None) -> dict:
@@ -129,21 +154,44 @@ def main(*, cycle_id: int | None = None) -> dict:
                 source_started = datetime.now(timezone.utc)
                 traced_materials = 0
                 try:
-                    if managed_by == "owner":
+                    if kind == "api" and source_code in TARIFF_API_SOURCES:
+                        tariff_rows = read_api_source(source_code)
+                        result = apply_tariff_snapshot(
+                            conn, source_id=source_id, source_code=source_code, rows=tariff_rows,
+                        )
+                        new = 0
+                        items = []
+                        print(f"[{SERVICE}] {name}: тарифный снимок сохранён; "
+                              f"изменений: {result['findings_created']}", flush=True)
+                    elif kind == "api":
+                        items = list(read_api_source(source_code))[:MAX_PER_SOURCE]
+                        new = 0
+                        for item in items:
+                            inserted, material_id = db.add_material(conn, source_id, run_id, item, return_id=True)
+                            new += int(inserted)
+                            if material_id is not None:
+                                db.record_trace_attempt(
+                                    conn, cycle_id=cycle_id, run_id=run_id, source_id=source_id,
+                                    material_id=material_id, stage="collection", status="success",
+                                    started_at=source_started, finished_at=datetime.now(timezone.utc),
+                                )
+                                traced_materials += 1
+                    elif managed_by == "owner":
                         items = list(READERS[kind](url, safe=True))[:MAX_PER_SOURCE]
+                        new = 0
                     else:
                         items = list(READERS[kind](url))[:MAX_PER_SOURCE]
-                    new = 0
-                    for item in items:
-                        inserted, material_id = db.add_material(conn, source_id, run_id, item, return_id=True)
-                        new += int(inserted)
-                        if material_id is not None:
-                            db.record_trace_attempt(
-                                conn, cycle_id=cycle_id, run_id=run_id, source_id=source_id,
-                                material_id=material_id, stage="collection", status="success",
-                                started_at=source_started, finished_at=datetime.now(timezone.utc),
-                            )
-                            traced_materials += 1
+                        new = 0
+                        for item in items:
+                            inserted, material_id = db.add_material(conn, source_id, run_id, item, return_id=True)
+                            new += int(inserted)
+                            if material_id is not None:
+                                db.record_trace_attempt(
+                                    conn, cycle_id=cycle_id, run_id=run_id, source_id=source_id,
+                                    material_id=material_id, stage="collection", status="success",
+                                    started_at=source_started, finished_at=datetime.now(timezone.utc),
+                                )
+                                traced_materials += 1
                     if traced_materials == 0:
                         db.record_trace_attempt(
                             conn, cycle_id=cycle_id, run_id=run_id, source_id=source_id,

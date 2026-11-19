@@ -358,6 +358,30 @@ CREATE TABLE IF NOT EXISTS finding_impacts (
 );
 CREATE INDEX IF NOT EXISTS finding_impacts_event_idx ON finding_impacts(event_id, id);
 
+CREATE TABLE IF NOT EXISTS marketplace_tariff_snapshot_runs (
+    id BIGSERIAL PRIMARY KEY,
+    source_code TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    row_count INTEGER NOT NULL CHECK (row_count >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS marketplace_tariff_snapshot_runs_source_idx
+    ON marketplace_tariff_snapshot_runs (source_code, id DESC);
+
+CREATE TABLE IF NOT EXISTS marketplace_tariff_snapshots (
+    snapshot_id BIGINT NOT NULL REFERENCES marketplace_tariff_snapshot_runs(id) ON DELETE CASCADE,
+    stable_key TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    service TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    approximate BOOLEAN NOT NULL DEFAULT false,
+    comparison_basis TEXT,
+    PRIMARY KEY (snapshot_id, stable_key)
+);
+ALTER TABLE marketplace_tariff_snapshots ADD COLUMN IF NOT EXISTS comparison_basis TEXT;
+
 CREATE TABLE IF NOT EXISTS feed_snapshots (
     id UUID PRIMARY KEY,
     period TEXT NOT NULL,
