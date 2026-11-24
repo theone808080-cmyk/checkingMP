@@ -122,6 +122,20 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertEqual(self.conn.transactions, 1)
 
+    def test_process_truncates_overlong_generated_translation_before_import(self):
+        overlong_text = "Перевод " + "слово " * 66 + "продолжение"
+        self.assertGreater(len(overlong_text), 400)
+        translations = [{**TRANSLATIONS[0], "text_ru": overlong_text}, TRANSLATIONS[1]]
+        payload = {"signals": [SIGNAL], "skipped_material_ids": [], "translations": translations}
+
+        with patch.object(worker, "open_url", return_value=response(json.dumps(payload, ensure_ascii=False))):
+            self.assertEqual(worker.process(self.conn), (1, 1, 1))
+
+        imported = self.import_mock.call_args.kwargs["translations"]
+        self.assertLessEqual(len(imported[0]["text_ru"]), 400)
+        self.assertTrue(imported[0]["text_ru"].endswith("…"))
+        self.assertEqual(self.conn.transactions, 1)
+
     def test_requires_complete_unique_translations_for_pending_materials(self):
         valid = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
         result = worker.validate(valid, BATCH)
@@ -313,7 +327,7 @@ class WorkerTests(unittest.TestCase):
             "translations": [{**TRANSLATIONS[0], "text_ru": translation_canary * 30}, TRANSLATIONS[1]],
         }
         diagnostic, output = self.rejected_diagnostic(response(json.dumps(payload)), batch=sensitive_batch)
-        self.assertEqual(diagnostic["reason"], "translation_text_too_long")
+        self.assertEqual(diagnostic["reason"], "schema_language_translation")
         self.assertNotIn(source_canary, output)
         self.assertNotIn(translation_canary, output)
 
