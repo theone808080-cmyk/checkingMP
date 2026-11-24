@@ -27,6 +27,10 @@ class ResponseValidationError(ValueError):
         super().__init__("Invalid OpenRouter response")
 
 
+class CompletionTruncatedError(RuntimeError):
+    """An OpenRouter completion hit its output limit and may be retried smaller."""
+
+
 def is_russian_text(value: str) -> bool:
     letters = [character for character in unicodedata.normalize("NFC", value) if character.isalpha()]
     if not letters:
@@ -267,6 +271,16 @@ def infer(batch, *, cycle_id=None):
             try:
                 decoded = strict_loads(content)
             except (ValueError, UnicodeError):
+                if finish_reason == "length":
+                    log_response_rejection(
+                        stage="content", reason="invalid_completion_json", cycle_id=cycle_id,
+                        model=model, batch_size=len(batch), http_status=http_status,
+                        finish_reason=finish_reason, completion_length=len(content),
+                        request_bytes=len(body),
+                    )
+                    failure = CompletionTruncatedError("OpenRouter response invalid; queue unchanged")
+                    failure.failure_signature = "completion_truncated"
+                    raise failure from None
                 rejected_response(stage="content", reason="invalid_completion_json", cycle_id=cycle_id,
                                  model=model, batch_size=len(batch), http_status=http_status,
                                  finish_reason=finish_reason, completion_length=len(content),
@@ -284,6 +298,23 @@ def infer(batch, *, cycle_id=None):
         failure.failure_signature = "transport"
         raise failure from None
     return payload
+
+
+def infer_with_length_fallback(batch, *, cycle_id=None):
+    try:
+        return infer(batch, cycle_id=cycle_id)
+    except CompletionTruncatedError:
+        if len(batch) <= 1:
+            raise
+        midpoint = len(batch) // 2
+        first = infer_with_length_fallback(batch[:midpoint], cycle_id=cycle_id)
+        second = infer_with_length_fallback(batch[midpoint:], cycle_id=cycle_id)
+        combined = {
+            "signals": first["signals"] + second["signals"],
+            "skipped_material_ids": first["skipped_material_ids"] + second["skipped_material_ids"],
+            "translations": first["translations"] + second["translations"],
+        }
+        return validate(combined, batch)
 
 
 def translate(batch):
@@ -357,7 +388,7 @@ def process(conn, *, cycle_id: int | None = None):
     analysis_started = datetime.now().astimezone()
     model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4.1-nano")[:120]
     try:
-        payload = validate(infer(batch, cycle_id=cycle_id), batch)
+        payload = validate(infer_with_length_fallback(batch, cycle_id=cycle_id), batch)
         impact_by_id = {}
         for item in batch:
             impact = item.get("seller_impact")

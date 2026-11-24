@@ -97,6 +97,31 @@ class WorkerTests(unittest.TestCase):
         self.import_mock.assert_called_once_with(self.conn, [imported_signal], [2], translations=TRANSLATIONS, reject_confirmed=True)
         self.assertEqual(self.conn.transactions, 1)
 
+    def test_process_splits_batch_when_openrouter_completion_is_truncated(self):
+        request_sizes = []
+        translation_by_id = {item["material_id"]: item for item in TRANSLATIONS}
+
+        def open_router(request, timeout):
+            body = json.loads(request.data)
+            request_batch = json.loads(body["messages"][1]["content"])
+            request_sizes.append(len(request_batch))
+            if len(request_batch) > 1:
+                return envelope({"choices": [{"finish_reason": "length",
+                                               "message": {"content": '{"signals": ['}}]})
+            material_id = request_batch[0]["material_id"]
+            content = json.dumps({"signals": [], "skipped_material_ids": [material_id],
+                                  "translations": [translation_by_id[material_id]]}, ensure_ascii=False)
+            return envelope({"choices": [{"finish_reason": "stop", "message": {"content": content}}]})
+
+        with patch.object(worker, "open_url", side_effect=open_router):
+            self.assertEqual(worker.process(self.conn), (1, 1, 1))
+
+        self.assertEqual(request_sizes, [2, 1, 1])
+        self.import_mock.assert_called_once_with(
+            self.conn, [], [1, 2], translations=TRANSLATIONS, reject_confirmed=True,
+        )
+        self.assertEqual(self.conn.transactions, 1)
+
     def test_requires_complete_unique_translations_for_pending_materials(self):
         valid = {"signals": [SIGNAL], "skipped_material_ids": [2], "translations": TRANSLATIONS}
         result = worker.validate(valid, BATCH)
